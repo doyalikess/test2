@@ -1,0 +1,19 @@
+http://localhost:5000/api/auth/login
+{
+  "username": "8888",
+  "password": "8888"
+}
+
+
+683470571adede25b411430a
+
+
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2ODM0NzA1NzFhZGVkZTI1YjQxMTQzMGEiLCJpYXQiOjE3NDgyNjkzNTcsImV4cCI6MTc0ODg3NDE1N30.PHejWFzQg7IT5o8ICgwZcF5AtRDWXldCCTXDS71gLA4
+
+
+
+
+http://localhost:5000/api/user/add-balance
+{
+  "amount": 55
+}
