@@ -21,6 +21,57 @@ const io = new Server(server, {
   },
 });
 
+// Jackpot game state outside connection handler
+const jackpotGame = {
+  players: [],  // { id, username, bet, socketId }
+  isRunning: false,
+  totalPot: 0,
+};
+
+async function startJackpotGame(io) {
+  jackpotGame.isRunning = true;
+  io.emit('jackpot_start');
+
+  // 7 second delay simulating the spinner
+  setTimeout(async () => {
+    // Weighted winner selection by bet amount
+    const totalBet = jackpotGame.players.reduce((sum, p) => sum + p.bet, 0);
+    let random = Math.random() * totalBet;
+    let winner = null;
+
+    for (const player of jackpotGame.players) {
+      if (random < player.bet) {
+        winner = player;
+        break;
+      }
+      random -= player.bet;
+    }
+
+    if (!winner) winner = jackpotGame.players[0]; // fallback
+
+    // Update winner balance in DB
+    try {
+      const user = await User.findById(winner.id);
+      if (user) {
+        user.balance += jackpotGame.totalPot;
+        await user.save();
+      }
+    } catch (err) {
+      console.error('Error updating jackpot winner balance:', err);
+    }
+
+    io.emit('jackpot_winner', {
+      winner: { id: winner.id, username: winner.username },
+      totalPot: jackpotGame.totalPot,
+    });
+
+    // Reset jackpot game state
+    jackpotGame.players = [];
+    jackpotGame.totalPot = 0;
+    jackpotGame.isRunning = false;
+  }, 7000);
+}
+
 io.on('connection', (socket) => {
   console.log('🔌 A user connected');
 
@@ -28,8 +79,84 @@ io.on('connection', (socket) => {
     io.emit('chatMessage', message);
   });
 
+  // Jackpot handlers
+  socket.on('join_jackpot', async ({ userId, username, bet }) => {
+    if (jackpotGame.isRunning) {
+      socket.emit('jackpot_error', 'A jackpot game is currently running. Please wait.');
+      return;
+    }
+
+    if (!bet || bet <= 0) {
+      socket.emit('jackpot_error', 'Invalid bet amount.');
+      return;
+    }
+
+    // Check if user already joined
+    if (jackpotGame.players.find(p => p.id === userId)) {
+      socket.emit('jackpot_error', 'You have already joined the jackpot.');
+      return;
+    }
+
+    // Check user balance
+    try {
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('jackpot_error', 'User not found.');
+        return;
+      }
+      if (user.balance < bet) {
+        socket.emit('jackpot_error', 'Insufficient balance.');
+        return;
+      }
+
+      // Deduct bet from user balance
+      user.balance -= bet;
+      await user.save();
+
+      // Add player to jackpot
+      jackpotGame.players.push({ id: userId, username, bet, socketId: socket.id });
+      jackpotGame.totalPot += bet;
+
+      // Broadcast current jackpot status to everyone
+      io.emit('jackpot_update', {
+        players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
+        totalPot: jackpotGame.totalPot,
+      });
+
+      // Start game if 2 or more players joined
+      if (jackpotGame.players.length >= 2) {
+        startJackpotGame(io);
+      }
+    } catch (err) {
+      console.error('Join jackpot error:', err);
+      socket.emit('jackpot_error', 'Server error while joining jackpot.');
+    }
+  });
+
+  // Handle disconnect - remove player if game not running
   socket.on('disconnect', () => {
     console.log('❌ A user disconnected');
+
+    if (!jackpotGame.isRunning) {
+      const idx = jackpotGame.players.findIndex(p => p.socketId === socket.id);
+      if (idx !== -1) {
+        const removed = jackpotGame.players.splice(idx, 1)[0];
+        jackpotGame.totalPot -= removed.bet;
+
+        // Refund the bet to disconnected user balance
+        User.findById(removed.id).then(user => {
+          if (user) {
+            user.balance += removed.bet;
+            return user.save();
+          }
+        }).catch(console.error);
+
+        io.emit('jackpot_update', {
+          players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
+          totalPot: jackpotGame.totalPot,
+        });
+      }
+    }
   });
 });
 
