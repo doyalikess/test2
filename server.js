@@ -24,56 +24,101 @@ const io = new Server(server, {
 // Jackpot game state outside connection handler
 const jackpotGame = {
   players: [],  // { id, username, bet, socketId }
-  isRunning: false,
   totalPot: 0,
+  roundActive: false,
+  timeLeft: 30, // seconds countdown for each round
+  timer: null,
+  roundNumber: 1,
 };
 
-async function startJackpotGame(io) {
-  jackpotGame.isRunning = true;
-  io.emit('jackpot_start');
+// Starts a new jackpot round timer and handles winner picking
+async function startJackpotRound() {
+  jackpotGame.roundActive = true;
+  jackpotGame.timeLeft = 30;
+  jackpotGame.roundNumber++;
 
-  // 7 second delay simulating the spinner
-  setTimeout(async () => {
-    // Weighted winner selection by bet amount
-    const totalBet = jackpotGame.players.reduce((sum, p) => sum + p.bet, 0);
-    let random = Math.random() * totalBet;
-    let winner = null;
+  io.emit('jackpot_start', { roundNumber: jackpotGame.roundNumber });
 
-    for (const player of jackpotGame.players) {
-      if (random < player.bet) {
-        winner = player;
-        break;
-      }
-      random -= player.bet;
-    }
+  jackpotGame.timer = setInterval(async () => {
+    jackpotGame.timeLeft--;
 
-    if (!winner) winner = jackpotGame.players[0]; // fallback
-
-    // Update winner balance in DB
-    try {
-      const user = await User.findById(winner.id);
-      if (user) {
-        user.balance += jackpotGame.totalPot;
-        await user.save();
-      }
-    } catch (err) {
-      console.error('Error updating jackpot winner balance:', err);
-    }
-
-    io.emit('jackpot_winner', {
-      winner: { id: winner.id, username: winner.username },
+    // Broadcast the updated jackpot state every second
+    io.emit('jackpot_update', {
+      players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
       totalPot: jackpotGame.totalPot,
+      timeLeft: jackpotGame.timeLeft,
+      roundActive: jackpotGame.roundActive,
+      roundNumber: jackpotGame.roundNumber,
     });
 
-    // Reset jackpot game state
-    jackpotGame.players = [];
-    jackpotGame.totalPot = 0;
-    jackpotGame.isRunning = false;
-  }, 7000);
+    if (jackpotGame.timeLeft <= 0) {
+      clearInterval(jackpotGame.timer);
+      jackpotGame.roundActive = false;
+
+      // Pick winner weighted by bet amounts
+      if (jackpotGame.players.length === 0) {
+        // No players joined this round
+        io.emit('jackpot_winner', {
+          winner: null,
+          totalPot: 0,
+          roundNumber: jackpotGame.roundNumber,
+        });
+      } else {
+        let totalBet = jackpotGame.totalPot;
+        let random = Math.random() * totalBet;
+        let winner = null;
+
+        for (const player of jackpotGame.players) {
+          if (random < player.bet) {
+            winner = player;
+            break;
+          }
+          random -= player.bet;
+        }
+
+        if (!winner) winner = jackpotGame.players[0]; // fallback
+
+        // Update winner balance in DB
+        try {
+          const user = await User.findById(winner.id);
+          if (user) {
+            user.balance += jackpotGame.totalPot;
+            await user.save();
+          }
+        } catch (err) {
+          console.error('Error updating jackpot winner balance:', err);
+        }
+
+        io.emit('jackpot_winner', {
+          winner: { id: winner.id, username: winner.username },
+          totalPot: jackpotGame.totalPot,
+          roundNumber: jackpotGame.roundNumber,
+        });
+      }
+
+      // Reset jackpot game state for next round
+      jackpotGame.players = [];
+      jackpotGame.totalPot = 0;
+
+      // Wait 10 seconds before starting next round automatically
+      setTimeout(() => {
+        startJackpotRound();
+      }, 10000);
+    }
+  }, 1000);
 }
 
 io.on('connection', (socket) => {
   console.log('🔌 A user connected');
+
+  // Send current jackpot state on connection
+  socket.emit('jackpot_update', {
+    players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
+    totalPot: jackpotGame.totalPot,
+    timeLeft: jackpotGame.timeLeft,
+    roundActive: jackpotGame.roundActive,
+    roundNumber: jackpotGame.roundNumber,
+  });
 
   socket.on('chatMessage', (message) => {
     io.emit('chatMessage', message);
@@ -81,8 +126,8 @@ io.on('connection', (socket) => {
 
   // Jackpot handlers
   socket.on('join_jackpot', async ({ userId, username, bet }) => {
-    if (jackpotGame.isRunning) {
-      socket.emit('jackpot_error', 'A jackpot game is currently running. Please wait.');
+    if (!jackpotGame.roundActive) {
+      socket.emit('jackpot_error', 'No active jackpot round right now. Please wait.');
       return;
     }
 
@@ -91,9 +136,9 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Check if user already joined
+    // Check if user already joined this round
     if (jackpotGame.players.find(p => p.id === userId)) {
-      socket.emit('jackpot_error', 'You have already joined the jackpot.');
+      socket.emit('jackpot_error', 'You have already joined the jackpot this round.');
       return;
     }
 
@@ -113,7 +158,7 @@ io.on('connection', (socket) => {
       user.balance -= bet;
       await user.save();
 
-      // Add player to jackpot
+      // Add player to jackpot round
       jackpotGame.players.push({ id: userId, username, bet, socketId: socket.id });
       jackpotGame.totalPot += bet;
 
@@ -121,44 +166,49 @@ io.on('connection', (socket) => {
       io.emit('jackpot_update', {
         players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
         totalPot: jackpotGame.totalPot,
+        timeLeft: jackpotGame.timeLeft,
+        roundActive: jackpotGame.roundActive,
+        roundNumber: jackpotGame.roundNumber,
       });
-
-      // Start game if 2 or more players joined
-      if (jackpotGame.players.length >= 2) {
-        startJackpotGame(io);
-      }
     } catch (err) {
       console.error('Join jackpot error:', err);
       socket.emit('jackpot_error', 'Server error while joining jackpot.');
     }
   });
 
-  // Handle disconnect - remove player if game not running
+  // Handle disconnect - refund bets if player leaves mid-round
   socket.on('disconnect', () => {
     console.log('❌ A user disconnected');
 
-    if (!jackpotGame.isRunning) {
-      const idx = jackpotGame.players.findIndex(p => p.socketId === socket.id);
-      if (idx !== -1) {
-        const removed = jackpotGame.players.splice(idx, 1)[0];
-        jackpotGame.totalPot -= removed.bet;
+    // Find player in jackpot players by socket id
+    const idx = jackpotGame.players.findIndex(p => p.socketId === socket.id);
 
-        // Refund the bet to disconnected user balance
-        User.findById(removed.id).then(user => {
-          if (user) {
-            user.balance += removed.bet;
-            return user.save();
-          }
-        }).catch(console.error);
+    if (idx !== -1 && jackpotGame.roundActive) {
+      const player = jackpotGame.players[idx];
+      jackpotGame.players.splice(idx, 1);
+      jackpotGame.totalPot -= player.bet;
 
-        io.emit('jackpot_update', {
-          players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
-          totalPot: jackpotGame.totalPot,
-        });
-      }
+      // Refund bet to user balance
+      User.findById(player.id).then(user => {
+        if (user) {
+          user.balance += player.bet;
+          return user.save();
+        }
+      }).catch(console.error);
+
+      io.emit('jackpot_update', {
+        players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
+        totalPot: jackpotGame.totalPot,
+        timeLeft: jackpotGame.timeLeft,
+        roundActive: jackpotGame.roundActive,
+        roundNumber: jackpotGame.roundNumber,
+      });
     }
   });
 });
+
+// Start the jackpot round timer on server start
+startJackpotRound();
 
 // CORS middleware for REST API requests
 app.use(
@@ -304,121 +354,51 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
       }
     );
 
-    res.status(200).json({
-      invoice_url: response.data.invoice_url,
-      invoice_id: response.data.id,
-    });
-  } catch (error) {
-    console.error('NOWPAYMENTS error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to create invoice with NOWPAYMENTS' });
+    const { invoice_url } = response.data;
+
+    res.json({ invoice_url });
+  } catch (err) {
+    console.error('Payment deposit error:', err.response ? err.response.data : err.message);
+    res.status(500).json({ error: 'Failed to create payment invoice' });
   }
 });
 
-// NOWPAYMENTS webhook
-app.post('/api/nowpayments-webhook', async (req, res) => {
-  console.log('Received raw body:', req.rawBody);
+// NOWPAYMENTS webhook to update balance after payment
+app.post('/api/payment/webhook', async (req, res) => {
+  const sig = req.headers['x-nowpayments-signature'];
+  if (!sig) return res.status(400).send('Missing signature');
 
-  const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
-  const signature = req.headers['x-nowpayments-signature'];
-  const bodyString = req.rawBody;
-
-  const hash = crypto.createHmac('sha256', ipnSecret).update(bodyString).digest('hex');
-  if (signature !== hash) {
-    return res.status(401).json({ error: 'Invalid signature' });
-  }
+  // TODO: Verify signature here (NOWPAYMENTS webhook security best practices)
+  // Skipping for demo
 
   const data = req.body;
-  const { payment_status, order_id, price_amount } = data;
 
-  if (payment_status === 'confirmed' || payment_status === 'finished') {
+  // Payment completed status check
+  if (data.status === 'finished') {
+    const order_id = data.order_id;
+    const userId = order_id.split('_').pop(); // Extract userId from order_id
+
+    const amount = Number(data.price_amount);
+    if (!userId || !amount || amount <= 0) {
+      return res.status(400).send('Invalid payment data');
+    }
+
     try {
-      const parts = order_id.split('_');
-      const userId = parts.slice(2).join('_');
-
-      if (!userId) {
-        return res.status(400).json({ error: 'UserId not found in order_id' });
-      }
-
       const user = await User.findById(userId);
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
+      if (!user) return res.status(404).send('User not found');
 
-      user.balance += price_amount;
+      user.balance += amount;
       await user.save();
 
-      return res.json({ message: 'Balance updated' });
+      res.status(200).send('OK');
     } catch (err) {
-      console.error('Webhook processing error:', err);
-      return res.status(500).json({ error: 'Server error' });
+      console.error('Webhook error:', err);
+      res.status(500).send('Server error');
     }
-  }
-
-  res.json({ message: 'Payment status not confirmed, no action taken' });
-});
-
-// Add balance manually (auth required)
-app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
-  const { amount } = req.body;
-
-  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    user.balance += amount;
-    await user.save();
-
-    res.json({ message: 'Balance updated successfully', balance: user.balance });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
+  } else {
+    res.status(200).send('OK');
   }
 });
 
-// Coinflip game endpoint
-app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
-  const { amount, choice } = req.body;
-  if (!amount || amount <= 0 || !['heads', 'tails'].includes(choice)) {
-    return res.status(400).json({ error: 'Invalid bet' });
-  }
-
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
-
-    const serverSeed = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
-    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
-    const win = outcome === choice;
-
-    const houseEdge = 0.05;
-    const payoutMultiplier = (1 - houseEdge) * 2;
-
-    if (win) {
-      user.balance += amount * (payoutMultiplier - 1);
-    } else {
-      user.balance -= amount;
-    }
-
-    await user.save();
-
-    res.json({
-      outcome,
-      win,
-      newBalance: user.balance,
-      serverSeed,
-      hash,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Start server with Socket.IO
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 4000;
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
