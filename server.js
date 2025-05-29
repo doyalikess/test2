@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -11,7 +12,6 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Socket.IO setup with CORS for frontend origins
 const io = new Server(server, {
   cors: {
     origin: ['http://localhost:3000', 'https://dgenrand0.vercel.app'],
@@ -22,120 +22,146 @@ const io = new Server(server, {
 
 // Jackpot game state
 const jackpotGame = {
-  players: [],  // { id, username, bet, socketId }
+  players: [],  // Each player: { id, username, bet, socketId }
+  isRunning: false,
   totalPot: 0,
-  roundActive: false,
-  timeLeft: 30,
-  timer: null,
-  roundNumber: 0,
 };
 
-// Helper to reset jackpot state
-function resetJackpot() {
-  jackpotGame.players = [];
-  jackpotGame.totalPot = 0;
-  jackpotGame.timeLeft = 30;
-  jackpotGame.roundActive = false;
-}
+async function startJackpotGame(io) {
+  jackpotGame.isRunning = true;
+  io.emit('jackpot_start');
 
-// Jackpot round logic
-async function startJackpotRound() {
-  if (jackpotGame.roundActive) return;
+  setTimeout(async () => {
+    // Calculate total bet amount
+    const totalBet = jackpotGame.players.reduce((sum, p) => sum + p.bet, 0);
 
-  jackpotGame.roundActive = true;
-  jackpotGame.timeLeft = 30;
-  jackpotGame.roundNumber++;
+    // Pick winner weighted by bet
+    let random = Math.random() * totalBet;
+    let winner = null;
+    for (const player of jackpotGame.players) {
+      if (random < player.bet) {
+        winner = player;
+        break;
+      }
+      random -= player.bet;
+    }
+    if (!winner) winner = jackpotGame.players[0]; // fallback
 
-  io.emit('jackpot_start', { roundNumber: jackpotGame.roundNumber });
+    // Update winner's balance in DB
+    try {
+      const user = await User.findById(winner.id);
+      if (user) {
+        user.balance += jackpotGame.totalPot;
+        await user.save();
+      }
+    } catch (err) {
+      console.error('Error updating jackpot winner balance:', err);
+    }
 
-  jackpotGame.timer = setInterval(async () => {
-    jackpotGame.timeLeft--;
-
-    io.emit('jackpot_update', {
-      players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
+    io.emit('jackpot_winner', {
+      winner: { id: winner.id, username: winner.username },
       totalPot: jackpotGame.totalPot,
-      timeLeft: jackpotGame.timeLeft,
-      roundActive: jackpotGame.roundActive,
-      roundNumber: jackpotGame.roundNumber,
     });
 
-    if (jackpotGame.timeLeft <= 0) {
-      clearInterval(jackpotGame.timer);
-      jackpotGame.roundActive = false;
-
-      if (jackpotGame.players.length === 0) {
-        io.emit('jackpot_winner', {
-          winner: null,
-          totalPot: 0,
-          roundNumber: jackpotGame.roundNumber,
-        });
-      } else {
-        let totalBet = jackpotGame.totalPot;
-        let random = Math.random() * totalBet;
-        let winner = null;
-
-        for (const player of jackpotGame.players) {
-          random -= player.bet;
-          if (random <= 0) {
-            winner = player;
-            break;
-          }
-        }
-
-        if (!winner) winner = jackpotGame.players[0]; // fallback
-
-        try {
-          const user = await User.findById(winner.id);
-          if (user) {
-            user.balance += jackpotGame.totalPot;
-            await user.save();
-          }
-        } catch (err) {
-          console.error('Error updating jackpot winner balance:', err);
-        }
-
-        io.emit('jackpot_winner', {
-          winner: { id: winner.id, username: winner.username },
-          totalPot: jackpotGame.totalPot,
-          roundNumber: jackpotGame.roundNumber,
-        });
-      }
-
-      resetJackpot();
-
-      setTimeout(() => {
-        startJackpotRound();
-      }, 10000);
-    }
-  }, 1000);
+    // Reset jackpot state
+    jackpotGame.players = [];
+    jackpotGame.totalPot = 0;
+    jackpotGame.isRunning = false;
+  }, 7000);
 }
 
-// User Schema and Model
-const UserSchema = new mongoose.Schema({
-  username: { type: String, unique: true, required: true },
-  passwordHash: { type: String, required: true },
-  balance: { type: Number, default: 0 },
+// Socket.IO connection handler
+io.on('connection', (socket) => {
+  console.log('🔌 A user connected');
+
+  // Chat message relay
+  socket.on('chatMessage', (message) => {
+    io.emit('chatMessage', message);
+  });
+
+  // Join jackpot game
+  socket.on('join_jackpot', async ({ userId, username, bet }) => {
+    if (jackpotGame.isRunning) {
+      socket.emit('jackpot_error', 'A jackpot game is currently running. Please wait.');
+      return;
+    }
+    if (!bet || bet <= 0) {
+      socket.emit('jackpot_error', 'Invalid bet amount.');
+      return;
+    }
+    if (jackpotGame.players.find(p => p.id === userId)) {
+      socket.emit('jackpot_error', 'You have already joined the jackpot.');
+      return;
+    }
+
+    try {
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('jackpot_error', 'User not found.');
+        return;
+      }
+      if (user.balance < bet) {
+        socket.emit('jackpot_error', 'Insufficient balance.');
+        return;
+      }
+
+      // Deduct bet and add player
+      user.balance -= bet;
+      await user.save();
+
+      jackpotGame.players.push({ id: userId, username, bet, socketId: socket.id });
+      jackpotGame.totalPot += bet;
+
+      // Broadcast current jackpot status
+      io.emit('jackpot_update', {
+        players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
+        totalPot: jackpotGame.totalPot,
+      });
+
+      // Start game if at least 2 players
+      if (jackpotGame.players.length >= 2) {
+        startJackpotGame(io);
+      }
+    } catch (err) {
+      console.error('Join jackpot error:', err);
+      socket.emit('jackpot_error', 'Server error while joining jackpot.');
+    }
+  });
+
+  // Handle disconnect: refund if game not running
+  socket.on('disconnect', () => {
+    console.log('❌ A user disconnected');
+
+    if (!jackpotGame.isRunning) {
+      const idx = jackpotGame.players.findIndex(p => p.socketId === socket.id);
+      if (idx !== -1) {
+        const removed = jackpotGame.players.splice(idx, 1)[0];
+        jackpotGame.totalPot -= removed.bet;
+
+        // Refund user balance asynchronously
+        User.findById(removed.id).then(user => {
+          if (user) {
+            user.balance += removed.bet;
+            return user.save();
+          }
+        }).catch(console.error);
+
+        io.emit('jackpot_update', {
+          players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
+          totalPot: jackpotGame.totalPot,
+        });
+      }
+    }
+  });
 });
 
-UserSchema.methods.setPassword = async function (password) {
-  this.passwordHash = await bcrypt.hash(password, 10);
-};
+// Middleware setup
+app.use(cors({
+  origin: ['http://localhost:3000', 'https://dgenrand0.vercel.app'],
+  credentials: true,
+}));
 
-UserSchema.methods.validatePassword = async function (password) {
-  return await bcrypt.compare(password, this.passwordHash);
-};
-
-const User = mongoose.model('User', UserSchema);
-
-// Middleware and routes setup
-
-app.use(
-  cors({
-    origin: ['http://localhost:3000', 'https://dgenrand0.vercel.app'],
-    credentials: true,
-  })
-);
-
+// Capture raw body for webhook signature validation
 const rawBodySaver = (req, res, buf, encoding) => {
   if (buf && buf.length) {
     req.rawBody = buf.toString(encoding || 'utf8');
@@ -143,16 +169,37 @@ const rawBodySaver = (req, res, buf, encoding) => {
 };
 app.use(express.json({ verify: rawBodySaver }));
 
-// Connect to MongoDB
-mongoose
-  .connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch((err) => {
-    console.error('MongoDB connection error:', err);
-    process.exit(1);
-  });
+// MongoDB connection
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('✅ MongoDB connected'))
+.catch((err) => {
+  console.error('MongoDB connection error:', err);
+  process.exit(1);
+});
 
-// Auth middleware
+const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
+
+// User model
+const UserSchema = new mongoose.Schema({
+  username: { type: String, unique: true, required: true },
+  passwordHash: { type: String, required: true },
+  balance: { type: Number, default: 0 },
+});
+
+UserSchema.methods.setPassword = async function(password) {
+  this.passwordHash = await bcrypt.hash(password, 10);
+};
+
+UserSchema.methods.validatePassword = async function(password) {
+  return await bcrypt.compare(password, this.passwordHash);
+};
+
+const User = mongoose.model('User', UserSchema);
+
+// Auth middleware to verify JWT
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Authorization header missing' });
@@ -161,7 +208,7 @@ function authMiddleware(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Token missing' });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret_key');
+    const decoded = jwt.verify(token, JWT_SECRET);
     req.userId = decoded.userId;
     next();
   } catch {
@@ -169,20 +216,20 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// Routes
+// === API Routes ===
 
+// Signup
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
   try {
-    let user = await User.findOne({ username });
-    if (user) return res.status(400).json({ error: 'Username already taken' });
-
-    user = new User({ username });
+    if (await User.findOne({ username })) {
+      return res.status(400).json({ error: 'Username already taken' });
+    }
+    const user = new User({ username });
     await user.setPassword(password);
     await user.save();
-
     res.json({ message: 'User created' });
   } catch (err) {
     console.error('Error creating user:', err);
@@ -190,6 +237,7 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 });
 
+// Login
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -198,16 +246,18 @@ app.post('/api/auth/login', async (req, res) => {
     const user = await User.findOne({ username });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
-    const valid = await user.validatePassword(password);
-    if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
+    if (!(await user.validatePassword(password))) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
 
-    const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET || 'secret_key', { expiresIn: '7d' });
+    const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, balance: user.balance, username: user.username });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Get current user info
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-passwordHash -__v');
@@ -222,49 +272,7 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
   }
 });
 
-// Tip endpoint: Authenticated user tips another user
-app.post('/api/tip', authMiddleware, async (req, res) => {
-  const { recipientUsername, amount } = req.body;
-
-  if (!recipientUsername || !amount || amount <= 0) {
-    return res.status(400).json({ error: 'Recipient username and positive amount are required' });
-  }
-
-  try {
-    const tipper = await User.findById(req.userId);
-    if (!tipper) return res.status(404).json({ error: 'Tipper user not found' });
-
-    if (tipper.balance < amount) {
-      return res.status(400).json({ error: 'Insufficient balance to tip' });
-    }
-
-    const recipient = await User.findOne({ username: recipientUsername });
-    if (!recipient) return res.status(404).json({ error: 'Recipient user not found' });
-
-    // Prevent tipping self
-    if (recipient._id.equals(tipper._id)) {
-      return res.status(400).json({ error: 'You cannot tip yourself' });
-    }
-
-    // Update balances
-    tipper.balance -= amount;
-    recipient.balance += amount;
-
-    await tipper.save();
-    await recipient.save();
-
-    res.json({
-      message: `Successfully tipped ${amount} to ${recipientUsername}`,
-      yourBalance: tipper.balance,
-      recipientBalance: recipient.balance,
-    });
-  } catch (err) {
-    console.error('Tip error:', err);
-    res.status(500).json({ error: 'Server error while processing tip' });
-  }
-});
-
-// Payment deposit endpoint
+// Deposit via NOWPAYMENTS
 app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   const { amount, currency } = req.body;
 
@@ -281,7 +289,7 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
         price_amount: amount,
         price_currency: currency.toUpperCase(),
         pay_currency: currency.toUpperCase(),
-        order_id: order_id,
+        order_id,
         order_description: 'Deposit',
       },
       {
@@ -292,149 +300,120 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
       }
     );
 
-    const { invoice_url } = response.data;
-
-    res.json({ invoice_url });
-  } catch (err) {
-    console.error('Payment deposit error:', err.response ? err.response.data : err.message);
-    res.status(500).json({ error: 'Failed to create payment invoice' });
+    res.status(200).json({
+      invoice_url: response.data.invoice_url,
+      invoice_id: response.data.id,
+    });
+  } catch (error) {
+    console.error('NOWPAYMENTS error:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to create invoice with NOWPAYMENTS' });
   }
 });
 
-// Webhook to update balance after payment
-app.post('/api/payment/webhook', async (req, res) => {
-  const sig = req.headers['x-nowpayments-signature'];
-  if (!sig) return res.status(400).send('Missing signature');
+// NOWPAYMENTS webhook
+app.post('/api/nowpayments-webhook', async (req, res) => {
+  const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
+  const signature = req.headers['x-nowpayments-signature'];
+  const bodyString = req.rawBody;
 
-  // TODO: Verify signature here for security
+  const hash = crypto.createHmac('sha256', ipnSecret).update(bodyString).digest('hex');
+  if (signature !== hash) {
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
 
   const data = req.body;
+  const { payment_status, order_id, price_amount } = data;
 
-  if (data.status === 'finished') {
-    const order_id = data.order_id;
-    const userId = order_id.split('_').pop();
-
-    const amount = Number(data.price_amount);
-    if (!userId || !amount || amount <= 0) {
-      return res.status(400).send('Invalid payment data');
-    }
-
+  if (payment_status === 'confirmed' || payment_status === 'finished') {
     try {
-      const user = await User.findById(userId);
-      if (!user) return res.status(404).send('User not found');
+      // Extract userId from order_id format: order_TIMESTAMP_userId
+      const parts = order_id.split('_');
+      const userId = parts.slice(2).join('_');
 
-      user.balance += amount;
+      if (!userId) {
+        return res.status(400).json({ error: 'UserId not found in order_id' });
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      user.balance += price_amount;
       await user.save();
 
-      res.status(200).send('OK');
+      return res.json({ message: 'Balance updated' });
     } catch (err) {
-      console.error('Webhook error:', err);
-      res.status(500).send('Server error');
+      console.error('Webhook processing error:', err);
+      return res.status(500).json({ error: 'Server error' });
     }
-  } else {
-    res.status(200).send('OK');
+  }
+
+  res.json({ message: 'Payment status not confirmed, no action taken' });
+});
+
+// Add balance manually (for admins or similar)
+app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
+  const { amount } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.balance += amount;
+    await user.save();
+
+    res.json({ message: 'Balance updated successfully', balance: user.balance });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Socket.IO jackpot logic and handlers
+// Coinflip game endpoint
+app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
+  const { amount, choice } = req.body;
+  if (!amount || amount <= 0 || !['heads', 'tails'].includes(choice)) {
+    return res.status(400).json({ error: 'Invalid bet' });
+  }
 
-io.on('connection', (socket) => {
-  console.log('🔌 A user connected:', socket.id);
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
 
-  // Send current jackpot state on connection
-  socket.emit('jackpot_update', {
-    players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
-    totalPot: jackpotGame.totalPot,
-    timeLeft: jackpotGame.timeLeft,
-    roundActive: jackpotGame.roundActive,
-    roundNumber: jackpotGame.roundNumber,
-  });
+    // Generate server seed and outcome
+    const serverSeed = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
+    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
+    const win = outcome === choice;
 
-  socket.on('chatMessage', (message) => {
-    io.emit('chatMessage', message);
-  });
+    const houseEdge = 0.05;
+    const payoutMultiplier = (1 - houseEdge) * 2;
 
-  socket.on('join_jackpot', async ({ userId, username, bet }) => {
-    if (!jackpotGame.roundActive) {
-      socket.emit('jackpot_error', 'No active jackpot round right now. Please wait.');
-      return;
+    if (win) {
+      user.balance += amount * (payoutMultiplier - 1);
+    } else {
+      user.balance -= amount;
     }
 
-    if (!bet || bet <= 0) {
-      socket.emit('jackpot_error', 'Invalid bet amount.');
-      return;
-    }
+    await user.save();
 
-    if (jackpotGame.players.some(p => p.id === userId)) {
-      socket.emit('jackpot_error', 'You have already joined the jackpot this round.');
-      return;
-    }
-
-    try {
-      const user = await User.findById(userId);
-      if (!user) {
-        socket.emit('jackpot_error', 'User not found.');
-        return;
-      }
-      if (user.balance < bet) {
-        socket.emit('jackpot_error', 'Insufficient balance.');
-        return;
-      }
-
-      user.balance -= bet;
-      await user.save();
-
-      jackpotGame.players.push({ id: userId, username, bet, socketId: socket.id });
-      jackpotGame.totalPot += bet;
-
-      io.emit('jackpot_update', {
-        players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
-        totalPot: jackpotGame.totalPot,
-        timeLeft: jackpotGame.timeLeft,
-        roundActive: jackpotGame.roundActive,
-        roundNumber: jackpotGame.roundNumber,
-      });
-    } catch (err) {
-      console.error('Join jackpot error:', err);
-      socket.emit('jackpot_error', 'Server error while joining jackpot.');
-    }
-  });
-
-  socket.on('disconnect', async () => {
-    console.log('❌ User disconnected:', socket.id);
-
-    const idx = jackpotGame.players.findIndex(p => p.socketId === socket.id);
-
-    if (idx !== -1 && jackpotGame.roundActive) {
-      const player = jackpotGame.players[idx];
-      jackpotGame.players.splice(idx, 1);
-      jackpotGame.totalPot -= player.bet;
-
-      try {
-        const user = await User.findById(player.id);
-        if (user) {
-          user.balance += player.bet;
-          await user.save();
-        }
-      } catch (err) {
-        console.error('Error refunding bet on disconnect:', err);
-      }
-
-      io.emit('jackpot_update', {
-        players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
-        totalPot: jackpotGame.totalPot,
-        timeLeft: jackpotGame.timeLeft,
-        roundActive: jackpotGame.roundActive,
-        roundNumber: jackpotGame.roundNumber,
-      });
-    }
-  });
+    res.json({
+      outcome,
+      win,
+      newBalance: user.balance,
+      serverSeed,
+      hash,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// Start first jackpot round on server startup
-startJackpotRound();
-
-const PORT = process.env.PORT || 8000;
+// Start the server with Socket.IO
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
