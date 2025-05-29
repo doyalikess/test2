@@ -222,6 +222,48 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
   }
 });
 
+// Tip endpoint: Authenticated user tips another user
+app.post('/api/tip', authMiddleware, async (req, res) => {
+  const { recipientUsername, amount } = req.body;
+
+  if (!recipientUsername || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'Recipient username and positive amount are required' });
+  }
+
+  try {
+    const tipper = await User.findById(req.userId);
+    if (!tipper) return res.status(404).json({ error: 'Tipper user not found' });
+
+    if (tipper.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance to tip' });
+    }
+
+    const recipient = await User.findOne({ username: recipientUsername });
+    if (!recipient) return res.status(404).json({ error: 'Recipient user not found' });
+
+    // Prevent tipping self
+    if (recipient._id.equals(tipper._id)) {
+      return res.status(400).json({ error: 'You cannot tip yourself' });
+    }
+
+    // Update balances
+    tipper.balance -= amount;
+    recipient.balance += amount;
+
+    await tipper.save();
+    await recipient.save();
+
+    res.json({
+      message: `Successfully tipped ${amount} to ${recipientUsername}`,
+      yourBalance: tipper.balance,
+      recipientBalance: recipient.balance,
+    });
+  } catch (err) {
+    console.error('Tip error:', err);
+    res.status(500).json({ error: 'Server error while processing tip' });
+  }
+});
+
 // Payment deposit endpoint
 app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   const { amount, currency } = req.body;
