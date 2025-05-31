@@ -1,8 +1,25 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/User');  // Import your User mongoose model
+const User = require('../models/User');
+const jwt = require('jsonwebtoken');
 
-// Helper: simulate roulette spin
+// Auth middleware - same logic as your user.js
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Authorization header missing' });
+
+  const token = authHeader.split(' ')[1]; // Extract token from "Bearer <token>"
+  if (!token) return res.status(401).json({ error: 'Token missing' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.userId = decoded.userId;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
 function spinRoulette() {
   const number = Math.floor(Math.random() * 37); // 0-36
   const color = number === 0 ? 'green' : (number % 2 === 0 ? 'black' : 'red');
@@ -10,29 +27,27 @@ function spinRoulette() {
 }
 
 // POST /api/game/roulette
-router.post('/game/roulette', async (req, res) => {
+router.post('/game/roulette', authMiddleware, async (req, res) => {
   try {
-    let { username, betAmount, betType, betValue } = req.body;
+    let { betAmount, betType, betValue } = req.body;
 
-    // Basic input validation
-    if (!username || !betAmount || !betType || betValue === undefined) {
+    // Validate input
+    if (!betAmount || !betType || betValue === undefined) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Convert betAmount to number
     betAmount = Number(betAmount);
     if (isNaN(betAmount) || betAmount <= 0) {
       return res.status(400).json({ error: 'Invalid bet amount' });
     }
 
-    // Normalize betType and betValue to lowercase for consistency
     betType = String(betType).toLowerCase();
     if (typeof betValue !== 'number') {
       betValue = String(betValue).toLowerCase();
     }
 
-    // Find user by username from MongoDB
-    const user = await User.findOne({ username });
+    // Find user by ID from JWT
+    const user = await User.findById(req.userId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -46,7 +61,6 @@ router.post('/game/roulette', async (req, res) => {
     let won = false;
     let payout = 0;
 
-    // Payout logic
     if (betType === 'color') {
       if (betValue === spin.color) {
         won = true;
@@ -70,11 +84,9 @@ router.post('/game/roulette', async (req, res) => {
       return res.status(400).json({ error: 'Invalid bet type' });
     }
 
-    // Update user balance
     user.balance -= betAmount;
     if (won) user.balance += payout;
 
-    // Save recent games (max 5)
     user.recentGames.unshift({
       betType,
       betValue,
