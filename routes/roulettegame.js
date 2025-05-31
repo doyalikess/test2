@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/User'); // Capital U, make sure path matches
+const User = require('../models/user');
 const jwt = require('jsonwebtoken');
 
 // Auth middleware to validate JWT token and set req.userId
