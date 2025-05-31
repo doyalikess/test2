@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -12,6 +11,9 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
+
+// Import roulette routes
+const rouletteRoutes = require('./roulettegames'); // Adjust path if roulettegames.js is in a different folder
 
 // Socket.IO setup with CORS for frontend origins
 const io = new Server(server, {
@@ -377,84 +379,54 @@ app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
   }
 });
 
-// === NEW TIP ENDPOINT ===
-app.post('/api/user/tip', authMiddleware, async (req, res) => {
-  const { recipientUsername, amount } = req.body;
-
-  if (!recipientUsername || !amount || amount <= 0) {
-    return res.status(400).json({ error: 'Recipient and positive amount are required' });
-  }
-
-  try {
-    const sender = await User.findById(req.userId);
-    if (!sender) return res.status(404).json({ error: 'Sender not found' });
-
-    if (sender.balance < amount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
-    }
-
-    const recipient = await User.findOne({ username: recipientUsername });
-    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
-
-    // Deduct from sender
-    sender.balance -= amount;
-
-    // Add to recipient
-    recipient.balance += amount;
-
-    // Save both users
-    await sender.save();
-    await recipient.save();
-
-    res.json({ message: `Successfully tipped ${amount} to ${recipientUsername}` });
-  } catch (err) {
-    console.error('Tip error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
 // Coinflip game endpoint
 app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
-  const { amount, choice } = req.body;
-  if (!amount || amount <= 0 || !['heads', 'tails'].includes(choice)) {
-    return res.status(400).json({ error: 'Invalid bet' });
-  }
+  const { betAmount, guess } = req.body;
+
+  if (!betAmount || betAmount <= 0) return res.status(400).json({ error: 'Invalid bet amount' });
+  if (!['heads', 'tails'].includes(guess)) return res.status(400).json({ error: 'Invalid guess' });
 
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+    if (user.balance < betAmount) return res.status(400).json({ error: 'Insufficient balance' });
 
-    const serverSeed = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
-    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
-    const win = outcome === choice;
+    // Deduct bet amount
+    user.balance -= betAmount;
 
-    const houseEdge = 0.05;
-    const payoutMultiplier = (1 - houseEdge) * 2;
+    // Simulate coin flip
+    const flipResult = Math.random() < 0.5 ? 'heads' : 'tails';
 
-    if (win) {
-      user.balance += amount * (payoutMultiplier - 1);
-    } else {
-      user.balance -= amount;
+    let payout = 0;
+    let won = false;
+
+    if (flipResult === guess) {
+      payout = betAmount * 2;
+      user.balance += payout;
+      won = true;
     }
 
     await user.save();
 
     res.json({
-      outcome,
-      win,
-      newBalance: user.balance,
-      serverSeed,
-      hash,
+      result: flipResult,
+      payout,
+      balance: user.balance,
+      message: won ? 'You won!' : 'You lost!',
     });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Start server with Socket.IO
+// Add roulette routes here
+app.use('/api/game/roulette', rouletteRoutes);
+
+// Fallback route
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' });
+});
+
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
