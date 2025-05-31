@@ -13,7 +13,7 @@ const app = express();
 const server = http.createServer(app);
 
 // Import roulette routes
-const rouletteRoutes = require('./roulettegames'); // Adjust path if roulettegames.js is in a different folder
+const rouletteRoutes = require('./roulettegame'); // Adjust path if roulettegames.js is in a different folder
 
 // Socket.IO setup with CORS for frontend origins
 const io = new Server(server, {
