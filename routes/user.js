@@ -14,7 +14,6 @@ function authMiddleware(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Token missing' });
 
   try {
-    // Decode the token to get the user ID
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.userId = decoded.userId; // Attach userId to request object
     next();
@@ -23,7 +22,30 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// Route to add balance for the user
+// ✅ Login route
+router.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password)
+    return res.status(400).json({ error: 'Username and password required' });
+
+  try {
+    const user = await User.findOne({ username });
+    if (!user || !(await user.validatePassword(password))) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
+      expiresIn: '7d',
+    });
+
+    res.json({ token, balance: user.balance, username: user.username });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Server error during login' });
+  }
+});
+
+// ✅ Add balance route (auth required)
 router.post('/add-balance', authMiddleware, async (req, res) => {
   const { amount } = req.body;
   
@@ -32,20 +54,12 @@ router.post('/add-balance', authMiddleware, async (req, res) => {
   }
 
   try {
-    // Find the user by userId (attached to req object by authMiddleware)
     const user = await User.findById(req.userId);
-    
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // Add the balance to the user's current balance
     user.balance += amount;
-
-    // Save the updated user
     await user.save();
 
-    // Respond with success message and updated balance
     res.json({
       message: 'Balance updated successfully',
       balance: user.balance
