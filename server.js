@@ -370,53 +370,51 @@ app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
     user.balance += amount;
     await user.save();
 
-    res.json({ message: 'Balance updated successfully', balance: user.balance });
+    res.json({ newBalance: user.balance });
   } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// === NEW TIP ENDPOINT ===
-app.post('/api/user/tip', authMiddleware, async (req, res) => {
-  const { recipientUsername, amount } = req.body;
-
-  if (!recipientUsername || !amount || amount <= 0) {
-    return res.status(400).json({ error: 'Recipient and positive amount are required' });
-  }
-
-  try {
-    const sender = await User.findById(req.userId);
-    if (!sender) return res.status(404).json({ error: 'Sender not found' });
-
-    if (sender.balance < amount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
-    }
-
-    const recipient = await User.findOne({ username: recipientUsername });
-    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
-
-    // Deduct from sender
-    sender.balance -= amount;
-
-    // Add to recipient
-    recipient.balance += amount;
-
-    // Save both users
-    await sender.save();
-    await recipient.save();
-
-    res.json({ message: `Successfully tipped ${amount} to ${recipientUsername}` });
-  } catch (err) {
-    console.error('Tip error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 // Coinflip game endpoint
 app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
-  const { amount, choice } = req.body;
-  if (!amount || amount <= 0 || !['heads', 'tails'].includes(choice)) {
-    return res.status(400).json({ error: 'Invalid bet' });
+  const { amount, side } = req.body; // side: 'heads' or 'tails'
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+  if (!['heads', 'tails'].includes(side)) return res.status(400).json({ error: 'Invalid side' });
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+
+    user.balance -= amount;
+
+    const flip = Math.random() < 0.5 ? 'heads' : 'tails';
+    let win = false;
+    if (flip === side) {
+      win = true;
+      user.balance += amount * 2; // 1:1 payout
+    }
+
+    await user.save();
+
+    res.json({ flip, win, newBalance: user.balance });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// === Added Roulette Game API Endpoint ===
+app.post('/api/game/roulette', authMiddleware, async (req, res) => {
+  const { amount, betType, betValue } = req.body; 
+  // betType example: 'number', 'color', 'oddEven'
+  // betValue example: for number: 0-36, for color: 'red'/'black', for oddEven: 'odd'/'even'
+
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid bet amount' });
+
+  const validBetTypes = ['number', 'color', 'oddEven'];
+  if (!validBetTypes.includes(betType)) {
+    return res.status(400).json({ error: 'Invalid bet type' });
   }
 
   try {
@@ -424,31 +422,62 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
 
-    const serverSeed = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
-    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
-    const win = outcome === choice;
+    // Deduct the bet first
+    user.balance -= amount;
 
-    const houseEdge = 0.05;
-    const payoutMultiplier = (1 - houseEdge) * 2;
+    // Roulette spin result: 0-36
+    const spinResult = Math.floor(Math.random() * 37);
+
+    // Determine color of spin result
+    // 0 = green, then red or black based on standard European roulette numbers
+    const redNumbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36];
+    const blackNumbers = [2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35];
+    const color = spinResult === 0 ? 'green' : (redNumbers.includes(spinResult) ? 'red' : 'black');
+
+    let win = false;
+    let payoutMultiplier = 0;
+
+    switch (betType) {
+      case 'number':
+        if (parseInt(betValue) === spinResult) {
+          win = true;
+          payoutMultiplier = 35;
+        }
+        break;
+
+      case 'color':
+        if (betValue === color) {
+          win = true;
+          payoutMultiplier = 2;
+        }
+        break;
+
+      case 'oddEven':
+        if (spinResult !== 0) {
+          const isEven = spinResult % 2 === 0;
+          if ((betValue === 'even' && isEven) || (betValue === 'odd' && !isEven)) {
+            win = true;
+            payoutMultiplier = 2;
+          }
+        }
+        break;
+    }
 
     if (win) {
-      user.balance += amount * (payoutMultiplier - 1);
-    } else {
-      user.balance -= amount;
+      user.balance += amount * payoutMultiplier;
     }
 
     await user.save();
 
     res.json({
-      outcome,
+      spinResult,
+      color,
       win,
+      payoutMultiplier: win ? payoutMultiplier : 0,
       newBalance: user.balance,
-      serverSeed,
-      hash,
     });
   } catch (err) {
-    console.error(err);
+    console.error('Roulette error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
