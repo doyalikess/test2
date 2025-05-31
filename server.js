@@ -457,7 +457,7 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
 // ... your entire existing code above ...
 
 // Add this line at the top with your requires:
-const rouletteRouter = require('./roulettegame');
+const rouletteRouter = require('./routes/roulettegame');
 
 // ... your existing code ...
 
