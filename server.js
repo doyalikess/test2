@@ -9,11 +9,10 @@ const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
 
+const rouletteRoutes = require('./routes/roulettegame'); // <-- updated path here
+
 const app = express();
 const server = http.createServer(app);
-
-// Import roulette routes
-const rouletteRoutes = require('./roulettegame'); // Adjust path if roulettegames.js is in a different folder
 
 // Socket.IO setup with CORS for frontend origins
 const io = new Server(server, {
@@ -350,84 +349,26 @@ app.post('/api/nowpayments-webhook', async (req, res) => {
       user.balance += price_amount;
       await user.save();
 
-      return res.json({ message: 'Balance updated' });
+      res.json({ success: true });
     } catch (err) {
-      console.error('Webhook processing error:', err);
-      return res.status(500).json({ error: 'Server error' });
+      console.error('Error processing payment:', err);
+      res.status(500).json({ error: 'Server error' });
     }
-  }
-
-  res.json({ message: 'Payment status not confirmed, no action taken' });
-});
-
-// Add balance manually (auth required)
-app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
-  const { amount } = req.body;
-
-  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    user.balance += amount;
-    await user.save();
-
-    res.json({ message: 'Balance updated successfully', balance: user.balance });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
+  } else {
+    res.json({ message: 'Payment not confirmed yet' });
   }
 });
 
-// Coinflip game endpoint
-app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
-  const { betAmount, guess } = req.body;
-
-  if (!betAmount || betAmount <= 0) return res.status(400).json({ error: 'Invalid bet amount' });
-  if (!['heads', 'tails'].includes(guess)) return res.status(400).json({ error: 'Invalid guess' });
-
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.balance < betAmount) return res.status(400).json({ error: 'Insufficient balance' });
-
-    // Deduct bet amount
-    user.balance -= betAmount;
-
-    // Simulate coin flip
-    const flipResult = Math.random() < 0.5 ? 'heads' : 'tails';
-
-    let payout = 0;
-    let won = false;
-
-    if (flipResult === guess) {
-      payout = betAmount * 2;
-      user.balance += payout;
-      won = true;
-    }
-
-    await user.save();
-
-    res.json({
-      result: flipResult,
-      payout,
-      balance: user.balance,
-      message: won ? 'You won!' : 'You lost!',
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Add roulette routes here
+// Mount roulette routes
 app.use('/api/game/roulette', rouletteRoutes);
 
-// Fallback route
+// 404 handler
 app.use((req, res) => {
-  res.status(404).json({ error: 'Route not found' });
+  res.status(404).json({ error: 'Not found' });
 });
 
 const PORT = process.env.PORT || 5000;
+
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
