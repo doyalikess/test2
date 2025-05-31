@@ -1,25 +1,26 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/user');
+const User = require('../models/User'); // Capital U, make sure path matches
 const jwt = require('jsonwebtoken');
 
-// Auth middleware - same logic as your user.js
+// Auth middleware to validate JWT token and set req.userId
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Authorization header missing' });
 
-  const token = authHeader.split(' ')[1]; // Extract token from "Bearer <token>"
+  const token = authHeader.split(' ')[1]; // Bearer <token>
   if (!token) return res.status(401).json({ error: 'Token missing' });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.userId = decoded.userId;
+    req.userId = decoded.userId;  // assumes token payload has userId field
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 }
 
+// Simulate roulette spin
 function spinRoulette() {
   const number = Math.floor(Math.random() * 37); // 0-36
   const color = number === 0 ? 'green' : (number % 2 === 0 ? 'black' : 'red');
@@ -31,7 +32,6 @@ router.post('/game/roulette', authMiddleware, async (req, res) => {
   try {
     let { betAmount, betType, betValue } = req.body;
 
-    // Validate input
     if (!betAmount || !betType || betValue === undefined) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -87,6 +87,8 @@ router.post('/game/roulette', authMiddleware, async (req, res) => {
     user.balance -= betAmount;
     if (won) user.balance += payout;
 
+    // Keep recent games array max 5 entries
+    user.recentGames = user.recentGames || [];
     user.recentGames.unshift({
       betType,
       betValue,
@@ -107,7 +109,6 @@ router.post('/game/roulette', authMiddleware, async (req, res) => {
       newBalance: user.balance,
       recentGames: user.recentGames,
     });
-
   } catch (error) {
     console.error('Roulette error:', error);
     res.status(500).json({ error: 'Server error' });
