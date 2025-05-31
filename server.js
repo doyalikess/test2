@@ -12,10 +12,10 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Import roulettegame route
+// Import roulettegame route (make sure ./routes/roulettegame.js exists)
 const rouletteGameRouter = require('./routes/roulettegame');
 
-// Socket.IO setup with CORS for frontend origins
+// Socket.IO setup with CORS
 const io = new Server(server, {
   cors: {
     origin: ['http://localhost:3000', 'https://dgenrand0.vercel.app'],
@@ -24,159 +24,37 @@ const io = new Server(server, {
   },
 });
 
-// Jackpot game state outside connection handler
-const jackpotGame = {
-  players: [],  // { id, username, bet, socketId }
-  isRunning: false,
-  totalPot: 0,
+// MongoDB User Schema & Model
+const UserSchema = new mongoose.Schema({
+  username: { type: String, unique: true, required: true },
+  passwordHash: { type: String, required: true },
+  balance: { type: Number, default: 0 },
+});
+UserSchema.methods.setPassword = async function (password) {
+  this.passwordHash = await bcrypt.hash(password, 10);
+};
+UserSchema.methods.validatePassword = async function (password) {
+  return await bcrypt.compare(password, this.passwordHash);
+};
+const User = mongoose.model('User', UserSchema);
+
+// JWT secret
+const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
+
+// Middleware to capture raw body for webhook signature verification
+const rawBodySaver = (req, res, buf, encoding) => {
+  if (buf && buf.length) {
+    req.rawBody = buf.toString(encoding || 'utf8');
+  }
 };
 
-async function startJackpotGame(io) {
-  jackpotGame.isRunning = true;
-  io.emit('jackpot_start');
-
-  // 7 second delay simulating the spinner
-  setTimeout(async () => {
-    // Weighted winner selection by bet amount
-    const totalBet = jackpotGame.players.reduce((sum, p) => sum + p.bet, 0);
-    let random = Math.random() * totalBet;
-    let winner = null;
-
-    for (const player of jackpotGame.players) {
-      if (random < player.bet) {
-        winner = player;
-        break;
-      }
-      random -= player.bet;
-    }
-
-    if (!winner) winner = jackpotGame.players[0]; // fallback
-
-    // Update winner balance in DB
-    try {
-      const user = await User.findById(winner.id);
-      if (user) {
-        user.balance += jackpotGame.totalPot;
-        await user.save();
-      }
-    } catch (err) {
-      console.error('Error updating jackpot winner balance:', err);
-    }
-
-    io.emit('jackpot_winner', {
-      winner: { id: winner.id, username: winner.username },
-      totalPot: jackpotGame.totalPot,
-    });
-
-    // Reset jackpot game state
-    jackpotGame.players = [];
-    jackpotGame.totalPot = 0;
-    jackpotGame.isRunning = false;
-  }, 7000);
-}
-
-io.on('connection', (socket) => {
-  console.log('🔌 A user connected');
-
-  socket.on('chatMessage', (message) => {
-    io.emit('chatMessage', message);
-  });
-
-  // Jackpot handlers
-  socket.on('join_jackpot', async ({ userId, username, bet }) => {
-    if (jackpotGame.isRunning) {
-      socket.emit('jackpot_error', 'A jackpot game is currently running. Please wait.');
-      return;
-    }
-
-    if (!bet || bet <= 0) {
-      socket.emit('jackpot_error', 'Invalid bet amount.');
-      return;
-    }
-
-    // Check if user already joined
-    if (jackpotGame.players.find(p => p.id === userId)) {
-      socket.emit('jackpot_error', 'You have already joined the jackpot.');
-      return;
-    }
-
-    // Check user balance
-    try {
-      const user = await User.findById(userId);
-      if (!user) {
-        socket.emit('jackpot_error', 'User not found.');
-        return;
-      }
-      if (user.balance < bet) {
-        socket.emit('jackpot_error', 'Insufficient balance.');
-        return;
-      }
-
-      // Deduct bet from user balance
-      user.balance -= bet;
-      await user.save();
-
-      // Add player to jackpot
-      jackpotGame.players.push({ id: userId, username, bet, socketId: socket.id });
-      jackpotGame.totalPot += bet;
-
-      // Broadcast current jackpot status to everyone
-      io.emit('jackpot_update', {
-        players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
-        totalPot: jackpotGame.totalPot,
-      });
-
-      // Start game if 2 or more players joined
-      if (jackpotGame.players.length >= 2) {
-        startJackpotGame(io);
-      }
-    } catch (err) {
-      console.error('Join jackpot error:', err);
-      socket.emit('jackpot_error', 'Server error while joining jackpot.');
-    }
-  });
-
-  // Handle disconnect - remove player if game not running
-  socket.on('disconnect', () => {
-    console.log('❌ A user disconnected');
-
-    if (!jackpotGame.isRunning) {
-      const idx = jackpotGame.players.findIndex(p => p.socketId === socket.id);
-      if (idx !== -1) {
-        const removed = jackpotGame.players.splice(idx, 1)[0];
-        jackpotGame.totalPot -= removed.bet;
-
-        // Refund the bet to disconnected user balance
-        User.findById(removed.id).then(user => {
-          if (user) {
-            user.balance += removed.bet;
-            return user.save();
-          }
-        }).catch(console.error);
-
-        io.emit('jackpot_update', {
-          players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
-          totalPot: jackpotGame.totalPot,
-        });
-      }
-    }
-  });
-});
-
-// CORS middleware for REST API requests
+// CORS for REST API
 app.use(
   cors({
     origin: ['http://localhost:3000', 'https://dgenrand0.vercel.app'],
     credentials: true,
   })
 );
-
-// Middleware to capture raw body (needed for webhook signature verification)
-const rawBodySaver = (req, res, buf, encoding) => {
-  if (buf && buf.length) {
-    req.rawBody = buf.toString(encoding || 'utf8');
-  }
-};
 app.use(express.json({ verify: rawBodySaver }));
 
 // Connect to MongoDB
@@ -187,24 +65,6 @@ mongoose
     console.error('MongoDB connection error:', err);
     process.exit(1);
   });
-
-const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
-
-const UserSchema = new mongoose.Schema({
-  username: { type: String, unique: true, required: true },
-  passwordHash: { type: String, required: true },
-  balance: { type: Number, default: 0 },
-});
-
-UserSchema.methods.setPassword = async function (password) {
-  this.passwordHash = await bcrypt.hash(password, 10);
-};
-
-UserSchema.methods.validatePassword = async function (password) {
-  return await bcrypt.compare(password, this.passwordHash);
-};
-
-const User = mongoose.model('User', UserSchema);
 
 // Auth middleware
 function authMiddleware(req, res, next) {
@@ -223,7 +83,7 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// === Routes ===
+// --- AUTH ROUTES ---
 
 // Signup
 app.post('/api/auth/signup', async (req, res) => {
@@ -270,16 +130,14 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     const user = await User.findById(req.userId).select('-passwordHash -__v');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    res.json({
-      username: user.username,
-      balance: user.balance,
-    });
+    res.json({ username: user.username, balance: user.balance });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Deposit endpoint with NOWPAYMENTS
+// --- PAYMENT (NOWPAYMENTS) ---
+
 app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   const { amount, currency } = req.body;
 
@@ -319,8 +177,6 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
 
 // NOWPAYMENTS webhook
 app.post('/api/nowpayments-webhook', async (req, res) => {
-  console.log('Received raw body:', req.rawBody);
-
   const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
   const signature = req.headers['x-nowpayments-signature'];
   const bodyString = req.rawBody;
@@ -337,15 +193,10 @@ app.post('/api/nowpayments-webhook', async (req, res) => {
     try {
       const parts = order_id.split('_');
       const userId = parts.slice(2).join('_');
-
-      if (!userId) {
-        return res.status(400).json({ error: 'UserId not found in order_id' });
-      }
+      if (!userId) return res.status(400).json({ error: 'UserId not found in order_id' });
 
       const user = await User.findById(userId);
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
+      if (!user) return res.status(404).json({ error: 'User not found' });
 
       user.balance += price_amount;
       await user.save();
@@ -360,10 +211,10 @@ app.post('/api/nowpayments-webhook', async (req, res) => {
   res.json({ message: 'Payment status not confirmed, no action taken' });
 });
 
-// Add balance manually (auth required)
+// --- USER BALANCE ---
+
 app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
   const { amount } = req.body;
-
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
   try {
@@ -379,7 +230,6 @@ app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
   }
 });
 
-// Get user balance
 app.get('/api/user/balance', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
@@ -391,29 +241,20 @@ app.get('/api/user/balance', authMiddleware, async (req, res) => {
   }
 });
 
-// --- Add the TIPPING endpoint here ---
+// --- TIPPING ---
+
 app.post('/api/user/tip', authMiddleware, async (req, res) => {
   const { toUserId, amount } = req.body;
 
-  if (!toUserId || !amount || amount <= 0) {
-    return res.status(400).json({ error: 'Invalid parameters' });
-  }
-
-  if (toUserId === req.userId) {
-    return res.status(400).json({ error: 'Cannot tip yourself' });
-  }
+  if (!toUserId || !amount || amount <= 0) return res.status(400).json({ error: 'Invalid parameters' });
+  if (toUserId === req.userId) return res.status(400).json({ error: 'Cannot tip yourself' });
 
   try {
     const fromUser = await User.findById(req.userId);
     const toUser = await User.findById(toUserId);
 
-    if (!fromUser || !toUser) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    if (fromUser.balance < amount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
-    }
+    if (!fromUser || !toUser) return res.status(404).json({ error: 'User not found' });
+    if (fromUser.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
 
     fromUser.balance -= amount;
     toUser.balance += amount;
@@ -428,11 +269,214 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
   }
 });
 
-// -- Keep your existing routes for roulette, coinflip etc here --
-// Mount roulettegame routes under /api/roulette
+// --- JACKPOT GAME ---
+
+const jackpotGame = {
+  players: [], // { id, username, bet, socketId }
+  isRunning: false,
+  totalPot: 0,
+};
+
+async function startJackpotGame(io) {
+  jackpotGame.isRunning = true;
+  io.emit('jackpot_start');
+
+  setTimeout(async () => {
+    const totalBet = jackpotGame.players.reduce((sum, p) => sum + p.bet, 0);
+    let random = Math.random() * totalBet;
+    let winner = null;
+
+    for (const player of jackpotGame.players) {
+      if (random < player.bet) {
+        winner = player;
+        break;
+      }
+      random -= player.bet;
+    }
+
+    if (!winner) winner = jackpotGame.players[0];
+
+    try {
+      const user = await User.findById(winner.id);
+      if (user) {
+        user.balance += jackpotGame.totalPot;
+        await user.save();
+      }
+    } catch (err) {
+      console.error('Error updating jackpot winner balance:', err);
+    }
+
+    io.emit('jackpot_winner', {
+      winner: { id: winner.id, username: winner.username },
+      totalPot: jackpotGame.totalPot,
+    });
+
+    jackpotGame.players = [];
+    jackpotGame.totalPot = 0;
+    jackpotGame.isRunning = false;
+  }, 7000);
+}
+
+io.on('connection', (socket) => {
+  console.log('🔌 A user connected');
+
+  socket.on('chatMessage', (message) => {
+    io.emit('chatMessage', message);
+  });
+
+  // Jackpot handlers
+  socket.on('join_jackpot', async ({ userId, username, bet }) => {
+    if (jackpotGame.isRunning) {
+      socket.emit('jackpot_error', 'A jackpot game is currently running. Please wait.');
+      return;
+    }
+    if (!bet || bet <= 0) {
+      socket.emit('jackpot_error', 'Invalid bet amount.');
+      return;
+    }
+    if (jackpotGame.players.find((p) => p.id === userId)) {
+      socket.emit('jackpot_error', 'You have already joined the jackpot.');
+      return;
+    }
+
+    try {
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('jackpot_error', 'User not found.');
+        return;
+      }
+      if (user.balance < bet) {
+        socket.emit('jackpot_error', 'Insufficient balance.');
+        return;
+      }
+
+      user.balance -= bet;
+      await user.save();
+
+      jackpotGame.players.push({ id: userId, username, bet, socketId: socket.id });
+      jackpotGame.totalPot += bet;
+
+      io.emit('jackpot_update', {
+        players: jackpotGame.players.map((p) => ({ username: p.username, bet: p.bet })),
+        totalPot: jackpotGame.totalPot,
+      });
+
+      if (jackpotGame.players.length >= 2) {
+        startJackpotGame(io);
+      }
+    } catch (err) {
+      console.error('Join jackpot error:', err);
+      socket.emit('jackpot_error', 'Server error.');
+    }
+  });
+
+  socket.on('disconnect', () => {
+    // Remove user from jackpot if they disconnect before game starts
+    const idx = jackpotGame.players.findIndex((p) => p.socketId === socket.id);
+    if (idx !== -1) {
+      jackpotGame.totalPot -= jackpotGame.players[idx].bet;
+      jackpotGame.players.splice(idx, 1);
+      io.emit('jackpot_update', {
+        players: jackpotGame.players.map((p) => ({ username: p.username, bet: p.bet })),
+        totalPot: jackpotGame.totalPot,
+      });
+    }
+    console.log('🔌 User disconnected');
+  });
+
+  // --- COINFLIP GAME ---
+
+  const coinflipGame = {
+    waitingPlayer: null, // { id, username, bet, socketId, choice }
+    activeGames: new Map(), // socketId => game details
+  };
+
+  socket.on('coinflip_join', async ({ userId, username, bet, choice }) => {
+    if (!bet || bet <= 0) {
+      socket.emit('coinflip_error', 'Invalid bet amount.');
+      return;
+    }
+    if (!['heads', 'tails'].includes(choice)) {
+      socket.emit('coinflip_error', 'Invalid choice.');
+      return;
+    }
+    try {
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('coinflip_error', 'User not found.');
+        return;
+      }
+      if (user.balance < bet) {
+        socket.emit('coinflip_error', 'Insufficient balance.');
+        return;
+      }
+
+      user.balance -= bet;
+      await user.save();
+
+      if (!coinflipGame.waitingPlayer) {
+        coinflipGame.waitingPlayer = { id: userId, username, bet, socketId: socket.id, choice };
+        socket.emit('coinflip_waiting', 'Waiting for an opponent...');
+      } else {
+        // Start game
+        const player1 = coinflipGame.waitingPlayer;
+        const player2 = { id: userId, username, bet, socketId: socket.id, choice };
+
+        // Bet must match
+        if (player1.bet !== player2.bet) {
+          // Refund player2
+          const refundUser = await User.findById(userId);
+          refundUser.balance += bet;
+          await refundUser.save();
+
+          socket.emit('coinflip_error', 'Bet amount must match the waiting player.');
+          return;
+        }
+
+        // Coin flip
+        const flipResult = Math.random() < 0.5 ? 'heads' : 'tails';
+
+        let winner = null;
+        if (flipResult === player1.choice) winner = player1;
+        else winner = player2;
+
+        // Winner gets total pot
+        const totalPot = player1.bet + player2.bet;
+
+        try {
+          const winnerUser = await User.findById(winner.id);
+          if (winnerUser) {
+            winnerUser.balance += totalPot;
+            await winnerUser.save();
+          }
+        } catch (err) {
+          console.error('Coinflip winner balance update error:', err);
+        }
+
+        // Notify players
+        io.to(player1.socketId).emit('coinflip_result', {
+          result: flipResult,
+          winner: winner.username,
+          totalPot,
+        });
+        io.to(player2.socketId).emit('coinflip_result', {
+          result: flipResult,
+          winner: winner.username,
+          totalPot,
+        });
+
+        coinflipGame.waitingPlayer = null;
+      }
+    } catch (err) {
+      console.error('Coinflip error:', err);
+      socket.emit('coinflip_error', 'Server error.');
+    }
+  });
+});
+
+// Mount roulette routes
 app.use('/api/roulette', rouletteGameRouter);
 
-// Start the server
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
