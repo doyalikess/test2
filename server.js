@@ -9,8 +9,6 @@ const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
 
-const rouletteRoutes = require('./routes/roulettegame'); // <-- updated path here
-
 const app = express();
 const server = http.createServer(app);
 
@@ -349,26 +347,193 @@ app.post('/api/nowpayments-webhook', async (req, res) => {
       user.balance += price_amount;
       await user.save();
 
-      res.json({ success: true });
+      return res.json({ message: 'Balance updated' });
     } catch (err) {
-      console.error('Error processing payment:', err);
-      res.status(500).json({ error: 'Server error' });
+      console.error('Webhook processing error:', err);
+      return res.status(500).json({ error: 'Server error' });
     }
-  } else {
-    res.json({ message: 'Payment not confirmed yet' });
+  }
+
+  res.json({ message: 'Payment status not confirmed, no action taken' });
+});
+
+// Add balance manually (auth required)
+app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
+  const { amount } = req.body;
+
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.balance += amount;
+    await user.save();
+
+    res.json({ message: 'Balance updated successfully', balance: user.balance });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Mount roulette routes
-app.use('/api/game/roulette', rouletteRoutes);
+// === NEW TIP ENDPOINT ===
+app.post('/api/user/tip', authMiddleware, async (req, res) => {
+  const { recipientUsername, amount } = req.body;
 
-// 404 handler
+  if (!recipientUsername || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'Recipient and positive amount are required' });
+  }
+
+  try {
+    const sender = await User.findById(req.userId);
+    if (!sender) return res.status(404).json({ error: 'Sender not found' });
+
+    if (sender.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+
+    const recipient = await User.findOne({ username: recipientUsername });
+    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+
+    // Deduct from sender
+    sender.balance -= amount;
+
+    // Add to recipient
+    recipient.balance += amount;
+
+    // Save both users
+    await sender.save();
+    await recipient.save();
+
+    res.json({ message: `Successfully tipped ${amount} to ${recipientUsername}` });
+  } catch (err) {
+    console.error('Tip error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Coinflip game endpoint
+app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
+  const { amount, choice } = req.body;
+  if (!amount || amount <= 0 || !['heads', 'tails'].includes(choice)) {
+    return res.status(400).json({ error: 'Invalid bet' });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+
+    const serverSeed = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
+    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
+    const win = outcome === choice;
+
+    const houseEdge = 0.05;
+    const payout = win ? amount * (1 - houseEdge) * 2 : 0;
+
+    if (win) user.balance += payout;
+    user.balance -= amount;
+    await user.save();
+
+    res.json({ win, payout, outcome, serverSeed });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 404 catch-all
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-const PORT = process.env.PORT || 5000;
-
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Server listening on port ${PORT}`);
+});
+
+// ----------- NEW ROULETTE GAME ROUTE ------------
+
+app.post('/api/game/roulette', authMiddleware, async (req, res) => {
+  const { betType, betValue, amount } = req.body;
+
+  // Validate input
+  const validBetTypes = ['number', 'color'];
+  if (!betType || !validBetTypes.includes(betType)) {
+    return res.status(400).json({ error: 'Invalid bet type' });
+  }
+
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'Invalid bet amount' });
+  }
+
+  if (betType === 'number') {
+    // betValue should be 0-36
+    if (!Number.isInteger(betValue) || betValue < 0 || betValue > 36) {
+      return res.status(400).json({ error: 'Invalid number bet value' });
+    }
+  } else if (betType === 'color') {
+    if (typeof betValue !== 'string' || !['red', 'black'].includes(betValue.toLowerCase())) {
+      return res.status(400).json({ error: 'Invalid color bet value' });
+    }
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (user.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+
+    // Deduct bet amount
+    user.balance -= amount;
+
+    // Spin the roulette: 0-36
+    const spinResult = Math.floor(Math.random() * 37); // 0 to 36 inclusive
+
+    // Determine color of the spinResult
+    // Standard roulette colors: 0 = green (house), then sequence of reds and blacks
+    const redNumbers = new Set([
+      1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36
+    ]);
+    const blackNumbers = new Set([
+      2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35
+    ]);
+    let spinColor = 'green';
+    if (redNumbers.has(spinResult)) spinColor = 'red';
+    else if (blackNumbers.has(spinResult)) spinColor = 'black';
+
+    let win = false;
+    let payout = 0;
+
+    if (betType === 'number') {
+      if (betValue === spinResult) {
+        win = true;
+        payout = amount * 35;
+      }
+    } else if (betType === 'color') {
+      if (betValue.toLowerCase() === spinColor) {
+        win = true;
+        payout = amount * 2;
+      }
+    }
+
+    if (win) {
+      user.balance += payout;
+    }
+
+    await user.save();
+
+    res.json({
+      spinResult,
+      spinColor,
+      win,
+      payout,
+      balance: user.balance,
+    });
+  } catch (err) {
+    console.error('Roulette game error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
