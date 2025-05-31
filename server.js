@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -133,7 +134,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle disconnect - remove player if game not running, refund bet
+  // Handle disconnect - remove player if game not running
   socket.on('disconnect', () => {
     console.log('❌ A user disconnected');
 
@@ -323,92 +324,65 @@ app.post('/api/nowpayments-webhook', async (req, res) => {
   const bodyString = req.rawBody;
 
   const hash = crypto.createHmac('sha256', ipnSecret).update(bodyString).digest('hex');
-
   if (signature !== hash) {
-    console.warn('NOWPAYMENTS webhook signature mismatch!');
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
-  const { order_id, payment_status, price_amount } = req.body;
+  const data = req.body;
+  const { payment_status, order_id, price_amount } = data;
 
-  // Example order_id format: order_<timestamp>_<userId>
-  const parts = order_id ? order_id.split('_') : [];
-  const userId = parts.length >= 3 ? parts[2] : null;
-
-  if (payment_status === 'finished' && userId) {
+  if (payment_status === 'confirmed' || payment_status === 'finished') {
     try {
-      const user = await User.findById(userId);
-      if (user) {
-        user.balance += price_amount;
-        await user.save();
-        console.log(`User ${user.username} balance updated by ${price_amount}`);
+      const parts = order_id.split('_');
+      const userId = parts.slice(2).join('_');
+
+      if (!userId) {
+        return res.status(400).json({ error: 'UserId not found in order_id' });
       }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      user.balance += price_amount;
+      await user.save();
+
+      return res.json({ message: 'Balance updated' });
     } catch (err) {
-      console.error('Error updating user balance from webhook:', err);
+      console.error('Webhook processing error:', err);
+      return res.status(500).json({ error: 'Server error' });
     }
   }
 
-  res.json({ success: true });
+  res.json({ message: 'Payment status not confirmed, no action taken' });
 });
 
-// Coinflip game
-// User sends a bet and a choice (e.g. "heads" or "tails")
-// The server flips a coin and returns win/loss and updated balance
-app.post('/api/coinflip', authMiddleware, async (req, res) => {
-  const { amount, choice } = req.body;
+// Add balance manually (auth required)
+app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
+  const { amount } = req.body;
 
-  if (!amount || !choice) {
-    return res.status(400).json({ error: 'Amount and choice are required' });
-  }
-
-  if (amount <= 0) {
-    return res.status(400).json({ error: 'Amount must be positive' });
-  }
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    if (user.balance < amount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
-    }
-
-    const houseEdge = 0.05; // 5%
-    const coinSides = ['heads', 'tails'];
-    const flipped = coinSides[Math.floor(Math.random() * 2)];
-    const win = flipped === choice;
-
-    if (win) {
-      // payout = amount * (2 - houseEdge*2) - amount = amount * (2 * (1 - houseEdge) - 1)
-      const payoutMultiplier = 2 * (1 - houseEdge);
-      user.balance += amount * (payoutMultiplier - 1);
-    } else {
-      user.balance -= amount;
-    }
-
+    user.balance += amount;
     await user.save();
 
-    res.json({
-      result: win ? 'win' : 'lose',
-      flipped,
-      balance: user.balance,
-    });
+    res.json({ message: 'Balance updated successfully', balance: user.balance });
   } catch (err) {
-    console.error('Coinflip error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Tip other user
-app.post('/api/tip', authMiddleware, async (req, res) => {
+// === NEW TIP ENDPOINT ===
+app.post('/api/user/tip', authMiddleware, async (req, res) => {
   const { recipientUsername, amount } = req.body;
 
-  if (!recipientUsername || !amount) {
-    return res.status(400).json({ error: 'Recipient username and amount are required' });
-  }
-
-  if (amount <= 0) {
-    return res.status(400).json({ error: 'Amount must be positive' });
+  if (!recipientUsername || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'Recipient and positive amount are required' });
   }
 
   try {
@@ -422,21 +396,66 @@ app.post('/api/tip', authMiddleware, async (req, res) => {
     const recipient = await User.findOne({ username: recipientUsername });
     if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
 
+    // Deduct from sender
     sender.balance -= amount;
+
+    // Add to recipient
     recipient.balance += amount;
 
+    // Save both users
     await sender.save();
     await recipient.save();
 
-    res.json({ message: `You tipped ${amount} to ${recipientUsername}` });
+    res.json({ message: `Successfully tipped ${amount} to ${recipientUsername}` });
   } catch (err) {
     console.error('Tip error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Start server
-const PORT = process.env.PORT || 3001;
+// Coinflip game endpoint
+app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
+  const { amount, choice } = req.body;
+  if (!amount || amount <= 0 || !['heads', 'tails'].includes(choice)) {
+    return res.status(400).json({ error: 'Invalid bet' });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+
+    const serverSeed = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
+    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
+    const win = outcome === choice;
+
+    const houseEdge = 0.05;
+    const payoutMultiplier = (1 - houseEdge) * 2;
+
+    if (win) {
+      user.balance += amount * (payoutMultiplier - 1);
+    } else {
+      user.balance -= amount;
+    }
+
+    await user.save();
+
+    res.json({
+      outcome,
+      win,
+      newBalance: user.balance,
+      serverSeed,
+      hash,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Start server with Socket.IO
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
