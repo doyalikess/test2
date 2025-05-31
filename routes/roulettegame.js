@@ -54,7 +54,7 @@ function spinRoulette() {
 }
 
 // 🎯 POST /api/game/roulette
-router.post('/game/roulette', authMiddleware, async (req, res) => {
+router.post('/roulette', authMiddleware, async (req, res) => {
   try {
     let { betAmount, betType, betValue } = req.body;
 
