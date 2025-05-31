@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -25,6 +24,13 @@ const io = new Server(server, {
 // Jackpot game state outside connection handler
 const jackpotGame = {
   players: [],  // { id, username, bet, socketId }
+  isRunning: false,
+  totalPot: 0,
+};
+
+// Roulette game state
+const rouletteGame = {
+  bets: [], // { userId, username, betAmount, betType, betValue, socketId }
   isRunning: false,
   totalPot: 0,
 };
@@ -71,6 +77,102 @@ async function startJackpotGame(io) {
     jackpotGame.totalPot = 0;
     jackpotGame.isRunning = false;
   }, 7000);
+}
+
+function calculateRoulettePayout(betType, betValue) {
+  // Returns multiplier payout for winning bets, 0 for losing.
+  // We'll implement basic roulette bets:
+  // - 'number': betValue is 0-36, payout 35:1
+  // - 'color': betValue is 'red' or 'black', payout 1:1
+  // - 'even_odd': betValue is 'even' or 'odd', payout 1:1
+  // - 'low_high': betValue is 'low' (1-18) or 'high' (19-36), payout 1:1
+  // For simplicity, zero (0) is neither red/black nor even/odd or low/high (house wins)
+
+  return (winningNumber) => {
+    if (betType === 'number') {
+      return betValue === winningNumber ? 36 : 0;
+    }
+
+    if (betType === 'color') {
+      // Roulette red numbers:
+      const redNumbers = [
+        1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36
+      ];
+      if (winningNumber === 0) return 0;
+      const isRed = redNumbers.includes(winningNumber);
+      return (betValue === 'red' && isRed) || (betValue === 'black' && !isRed) ? 2 : 0;
+    }
+
+    if (betType === 'even_odd') {
+      if (winningNumber === 0) return 0;
+      const isEven = winningNumber % 2 === 0;
+      return (betValue === 'even' && isEven) || (betValue === 'odd' && !isEven) ? 2 : 0;
+    }
+
+    if (betType === 'low_high') {
+      if (winningNumber === 0) return 0;
+      const isLow = winningNumber >= 1 && winningNumber <= 18;
+      return (betValue === 'low' && isLow) || (betValue === 'high' && !isLow) ? 2 : 0;
+    }
+
+    return 0;
+  };
+}
+
+async function startRouletteGame(io) {
+  rouletteGame.isRunning = true;
+  io.emit('roulette_start');
+
+  // Wait 10 seconds for bets
+  setTimeout(async () => {
+    const winningNumber = Math.floor(Math.random() * 37); // 0-36
+    const payoutResults = [];
+
+    // For each bet, calculate payout
+    for (const bet of rouletteGame.bets) {
+      const payoutMultiplierFunc = calculateRoulettePayout(bet.betType, bet.betValue);
+      const multiplier = payoutMultiplierFunc(winningNumber);
+
+      try {
+        const user = await User.findById(bet.userId);
+        if (!user) continue;
+
+        if (multiplier > 0) {
+          const winnings = bet.betAmount * multiplier;
+          user.balance += winnings;
+          payoutResults.push({
+            username: bet.username,
+            winnings,
+            betAmount: bet.betAmount,
+            betType: bet.betType,
+            betValue: bet.betValue,
+          });
+        } else {
+          // Player lost their bet amount (already deducted when placing bet)
+          payoutResults.push({
+            username: bet.username,
+            winnings: 0,
+            betAmount: bet.betAmount,
+            betType: bet.betType,
+            betValue: bet.betValue,
+          });
+        }
+        await user.save();
+      } catch (err) {
+        console.error('Roulette payout error:', err);
+      }
+    }
+
+    io.emit('roulette_result', {
+      winningNumber,
+      payouts: payoutResults,
+    });
+
+    // Reset roulette game state
+    rouletteGame.bets = [];
+    rouletteGame.totalPot = 0;
+    rouletteGame.isRunning = false;
+  }, 10000);
 }
 
 io.on('connection', (socket) => {
@@ -134,7 +236,94 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle disconnect - remove player if game not running
+  // Roulette handlers
+  socket.on('place_roulette_bet', async ({ userId, username, betAmount, betType, betValue }) => {
+    if (rouletteGame.isRunning) {
+      socket.emit('roulette_error', 'Roulette game in progress. Please wait for the next round.');
+      return;
+    }
+
+    if (!betAmount || betAmount <= 0) {
+      socket.emit('roulette_error', 'Invalid bet amount.');
+      return;
+    }
+
+    // Validate betType and betValue
+    const validBetTypes = ['number', 'color', 'even_odd', 'low_high'];
+    if (!validBetTypes.includes(betType)) {
+      socket.emit('roulette_error', 'Invalid bet type.');
+      return;
+    }
+
+    if (betType === 'number') {
+      if (typeof betValue !== 'number' || betValue < 0 || betValue > 36) {
+        socket.emit('roulette_error', 'Invalid number bet value.');
+        return;
+      }
+    }
+
+    if (betType === 'color') {
+      if (!['red', 'black'].includes(betValue)) {
+        socket.emit('roulette_error', 'Invalid color bet value.');
+        return;
+      }
+    }
+
+    if (betType === 'even_odd') {
+      if (!['even', 'odd'].includes(betValue)) {
+        socket.emit('roulette_error', 'Invalid even/odd bet value.');
+        return;
+      }
+    }
+
+    if (betType === 'low_high') {
+      if (!['low', 'high'].includes(betValue)) {
+        socket.emit('roulette_error', 'Invalid low/high bet value.');
+        return;
+      }
+    }
+
+    // Check if user has enough balance
+    try {
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('roulette_error', 'User not found.');
+        return;
+      }
+      if (user.balance < betAmount) {
+        socket.emit('roulette_error', 'Insufficient balance.');
+        return;
+      }
+
+      // Deduct bet amount
+      user.balance -= betAmount;
+      await user.save();
+
+      // Add bet to roulette game state
+      rouletteGame.bets.push({ userId, username, betAmount, betType, betValue, socketId: socket.id });
+      rouletteGame.totalPot += betAmount;
+
+      io.emit('roulette_update', {
+        bets: rouletteGame.bets.map(b => ({
+          username: b.username,
+          betAmount: b.betAmount,
+          betType: b.betType,
+          betValue: b.betValue,
+        })),
+        totalPot: rouletteGame.totalPot,
+      });
+
+      // Start roulette if >= 2 bets
+      if (rouletteGame.bets.length >= 2 && !rouletteGame.isRunning) {
+        startRouletteGame(io);
+      }
+    } catch (err) {
+      console.error('Place roulette bet error:', err);
+      socket.emit('roulette_error', 'Server error placing bet.');
+    }
+  });
+
+  // Handle disconnect - remove player from jackpot and roulette if game not running
   socket.on('disconnect', () => {
     console.log('❌ A user disconnected');
 
@@ -155,6 +344,32 @@ io.on('connection', (socket) => {
         io.emit('jackpot_update', {
           players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
           totalPot: jackpotGame.totalPot,
+        });
+      }
+    }
+
+    if (!rouletteGame.isRunning) {
+      const idx = rouletteGame.bets.findIndex(b => b.socketId === socket.id);
+      if (idx !== -1) {
+        const removed = rouletteGame.bets.splice(idx, 1)[0];
+        rouletteGame.totalPot -= removed.betAmount;
+
+        // Refund bet amount to disconnected user
+        User.findById(removed.userId).then(user => {
+          if (user) {
+            user.balance += removed.betAmount;
+            return user.save();
+          }
+        }).catch(console.error);
+
+        io.emit('roulette_update', {
+          bets: rouletteGame.bets.map(b => ({
+            username: b.username,
+            betAmount: b.betAmount,
+            betType: b.betType,
+            betValue: b.betValue,
+          })),
+          totalPot: rouletteGame.totalPot,
         });
       }
     }
@@ -265,103 +480,17 @@ app.post('/api/auth/login', async (req, res) => {
 // Get current user info
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('-passwordHash -__v');
+    const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
-
-    res.json({
-      username: user.username,
-      balance: user.balance,
-    });
-  } catch (err) {
+    res.json({ username: user.username, balance: user.balance });
+  } catch {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Deposit endpoint with NOWPAYMENTS
-app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
-  const { amount, currency } = req.body;
-
-  if (!amount || !currency) {
-    return res.status(400).json({ error: 'Amount and currency are required' });
-  }
-
-  try {
-    const order_id = `order_${Date.now()}_${req.userId}`;
-
-    const response = await axios.post(
-      'https://api.nowpayments.io/v1/invoice',
-      {
-        price_amount: amount,
-        price_currency: currency.toUpperCase(),
-        pay_currency: currency.toUpperCase(),
-        order_id: order_id,
-        order_description: 'Deposit',
-      },
-      {
-        headers: {
-          'x-api-key': process.env.NOWPAYMENTS_API_KEY,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    res.status(200).json({
-      invoice_url: response.data.invoice_url,
-      invoice_id: response.data.id,
-    });
-  } catch (error) {
-    console.error('NOWPAYMENTS error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to create invoice with NOWPAYMENTS' });
-  }
-});
-
-// NOWPAYMENTS webhook
-app.post('/api/nowpayments-webhook', async (req, res) => {
-  console.log('Received raw body:', req.rawBody);
-
-  const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
-  const signature = req.headers['x-nowpayments-signature'];
-  const bodyString = req.rawBody;
-
-  const hash = crypto.createHmac('sha256', ipnSecret).update(bodyString).digest('hex');
-  if (signature !== hash) {
-    return res.status(401).json({ error: 'Invalid signature' });
-  }
-
-  const data = req.body;
-  const { payment_status, order_id, price_amount } = data;
-
-  if (payment_status === 'confirmed' || payment_status === 'finished') {
-    try {
-      const parts = order_id.split('_');
-      const userId = parts.slice(2).join('_');
-
-      if (!userId) {
-        return res.status(400).json({ error: 'UserId not found in order_id' });
-      }
-
-      const user = await User.findById(userId);
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      user.balance += price_amount;
-      await user.save();
-
-      return res.json({ message: 'Balance updated' });
-    } catch (err) {
-      console.error('Webhook processing error:', err);
-      return res.status(500).json({ error: 'Server error' });
-    }
-  }
-
-  res.json({ message: 'Payment status not confirmed, no action taken' });
-});
-
-// Add balance manually (auth required)
-app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
+// Add coins (admin or user request simulation)
+app.post('/api/addcoins', authMiddleware, async (req, res) => {
   const { amount } = req.body;
-
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
   try {
@@ -370,92 +499,113 @@ app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
 
     user.balance += amount;
     await user.save();
-
-    res.json({ message: 'Balance updated successfully', balance: user.balance });
-  } catch (err) {
+    res.json({ balance: user.balance });
+  } catch {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// === NEW TIP ENDPOINT ===
-app.post('/api/user/tip', authMiddleware, async (req, res) => {
-  const { recipientUsername, amount } = req.body;
+// PayPal payment webhook (mock)
+app.post('/api/paypal/webhook', (req, res) => {
+  // Validate webhook signature if needed (omitted here)
 
-  if (!recipientUsername || !amount || amount <= 0) {
-    return res.status(400).json({ error: 'Recipient and positive amount are required' });
-  }
-
-  try {
-    const sender = await User.findById(req.userId);
-    if (!sender) return res.status(404).json({ error: 'Sender not found' });
-
-    if (sender.balance < amount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
-    }
-
-    const recipient = await User.findOne({ username: recipientUsername });
-    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
-
-    // Deduct from sender
-    sender.balance -= amount;
-
-    // Add to recipient
-    recipient.balance += amount;
-
-    // Save both users
-    await sender.save();
-    await recipient.save();
-
-    res.json({ message: `Successfully tipped ${amount} to ${recipientUsername}` });
-  } catch (err) {
-    console.error('Tip error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
+  // Process payment info from req.rawBody or req.body
+  // For demo, just respond OK
+  res.sendStatus(200);
 });
 
-// Coinflip game endpoint
-app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
-  const { amount, choice } = req.body;
-  if (!amount || amount <= 0 || !['heads', 'tails'].includes(choice)) {
-    return res.status(400).json({ error: 'Invalid bet' });
-  }
+// Coinflip game logic
+const coinflipGame = {
+  players: [], // { id, username, bet, choice, socketId }
+  isRunning: false,
+  totalPot: 0,
+};
 
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+async function startCoinflipGame(io) {
+  coinflipGame.isRunning = true;
+  io.emit('coinflip_start');
 
-    const serverSeed = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
-    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
-    const win = outcome === choice;
+  setTimeout(async () => {
+    // Flip coin
+    const flipResult = Math.random() < 0.5 ? 'heads' : 'tails';
 
-    const houseEdge = 0.05;
-    const payoutMultiplier = (1 - houseEdge) * 2;
+    // Payout winners
+    for (const player of coinflipGame.players) {
+      try {
+        const user = await User.findById(player.id);
+        if (!user) continue;
 
-    if (win) {
-      user.balance += amount * (payoutMultiplier - 1);
-    } else {
-      user.balance -= amount;
+        if (player.choice === flipResult) {
+          user.balance += player.bet * 2;
+        }
+        await user.save();
+      } catch (err) {
+        console.error('Coinflip payout error:', err);
+      }
     }
 
-    await user.save();
-
-    res.json({
-      outcome,
-      win,
-      newBalance: user.balance,
-      serverSeed,
-      hash,
+    io.emit('coinflip_result', {
+      result: flipResult,
+      players: coinflipGame.players.map(p => ({ username: p.username, bet: p.bet, choice: p.choice })),
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
+
+    coinflipGame.players = [];
+    coinflipGame.totalPot = 0;
+    coinflipGame.isRunning = false;
+  }, 7000);
+}
+
+io.on('connection', (socket) => {
+  // Duplicate events avoided by using same handler
+
+  socket.on('join_coinflip', async ({ userId, username, bet, choice }) => {
+    if (coinflipGame.isRunning) {
+      socket.emit('coinflip_error', 'Coinflip game is in progress.');
+      return;
+    }
+    if (bet <= 0 || !['heads', 'tails'].includes(choice)) {
+      socket.emit('coinflip_error', 'Invalid bet or choice.');
+      return;
+    }
+
+    if (coinflipGame.players.find(p => p.id === userId)) {
+      socket.emit('coinflip_error', 'You already joined the coinflip.');
+      return;
+    }
+
+    try {
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('coinflip_error', 'User not found.');
+        return;
+      }
+      if (user.balance < bet) {
+        socket.emit('coinflip_error', 'Insufficient balance.');
+        return;
+      }
+
+      user.balance -= bet;
+      await user.save();
+
+      coinflipGame.players.push({ id: userId, username, bet, choice, socketId: socket.id });
+      coinflipGame.totalPot += bet;
+
+      io.emit('coinflip_update', {
+        players: coinflipGame.players.map(p => ({ username: p.username, bet: p.bet, choice: p.choice })),
+        totalPot: coinflipGame.totalPot,
+      });
+
+      if (coinflipGame.players.length >= 2) {
+        startCoinflipGame(io);
+      }
+    } catch (err) {
+      console.error('Join coinflip error:', err);
+      socket.emit('coinflip_error', 'Server error.');
+    }
+  });
 });
 
-// Start server with Socket.IO
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
