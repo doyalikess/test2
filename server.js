@@ -12,6 +12,9 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
+// Import roulettegame route
+const rouletteGameRouter = require('./routes/roulettegame');
+
 // Socket.IO setup with CORS for frontend origins
 const io = new Server(server, {
   cors: {
@@ -426,7 +429,8 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
 });
 
 // -- Keep your existing routes for roulette, coinflip etc here --
-// Placeholder: add your roulette, coinflip, etc routes here as per your current implementation
+// Mount roulettegame routes under /api/roulette
+app.use('/api/roulette', rouletteGameRouter);
 
 // Start the server
 const PORT = process.env.PORT || 4000;
