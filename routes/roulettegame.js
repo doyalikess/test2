@@ -1,33 +1,59 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/user');
 const jwt = require('jsonwebtoken');
 
-// Auth middleware to validate JWT token and set req.userId
+// ✅ Fix: Prevent OverwriteModelError
+const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
+
+const UserSchema = new mongoose.Schema({
+  username: { type: String, unique: true, required: true },
+  passwordHash: { type: String, required: true },
+  balance: { type: Number, default: 0 },
+  recentGames: {
+    type: [Object],
+    default: [],
+  },
+});
+
+// Set password
+UserSchema.methods.setPassword = async function (password) {
+  this.passwordHash = await bcrypt.hash(password, 10);
+};
+
+// Validate password
+UserSchema.methods.validatePassword = async function (password) {
+  return await bcrypt.compare(password, this.passwordHash);
+};
+
+// ✅ Reuse model if already registered
+const User = mongoose.models.User || mongoose.model('User', UserSchema);
+
+// 🔐 JWT Auth middleware
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Authorization header missing' });
 
-  const token = authHeader.split(' ')[1]; // Bearer <token>
+  const token = authHeader.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Token missing' });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.userId = decoded.userId;  // assumes token payload has userId field
+    req.userId = decoded.userId;
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 }
 
-// Simulate roulette spin
+// 🎰 Simulate roulette spin
 function spinRoulette() {
   const number = Math.floor(Math.random() * 37); // 0-36
   const color = number === 0 ? 'green' : (number % 2 === 0 ? 'black' : 'red');
   return { number, color };
 }
 
-// POST /api/game/roulette
+// 🎯 POST /api/game/roulette
 router.post('/game/roulette', authMiddleware, async (req, res) => {
   try {
     let { betAmount, betType, betValue } = req.body;
@@ -46,7 +72,6 @@ router.post('/game/roulette', authMiddleware, async (req, res) => {
       betValue = String(betValue).toLowerCase();
     }
 
-    // Find user by ID from JWT
     const user = await User.findById(req.userId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -57,7 +82,6 @@ router.post('/game/roulette', authMiddleware, async (req, res) => {
     }
 
     const spin = spinRoulette();
-
     let won = false;
     let payout = 0;
 
@@ -87,7 +111,6 @@ router.post('/game/roulette', authMiddleware, async (req, res) => {
     user.balance -= betAmount;
     if (won) user.balance += payout;
 
-    // Keep recent games array max 5 entries
     user.recentGames = user.recentGames || [];
     user.recentGames.unshift({
       betType,
