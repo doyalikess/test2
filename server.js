@@ -383,61 +383,39 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   email: { type: String, required: true, unique: true },
   passwordHash: { type: String, required: true },
-  balance: { type: Number, default: 1000 },
-  isAdmin: { type: Boolean, default: false },
-  refreshToken: String,
+  balance: { type: Number, default: 0 },
+  resetPasswordToken: String,
+  resetPasswordExpires: Date,
 });
 
 const User = mongoose.model('User', userSchema);
 
-// --- Middleware ---
-app.use(cors({ origin: ['http://localhost:3000', 'https://dgenrand0.vercel.app'], credentials: true }));
+// --- Middlewares ---
+app.use(cors());
 app.use(express.json());
 
-// --- JWT helper functions ---
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'your_jwt_refresh_secret';
-
-function generateAccessToken(user) {
-  return jwt.sign({ id: user._id, username: user.username, isAdmin: user.isAdmin }, JWT_SECRET, { expiresIn: '15m' });
-}
-
-function generateRefreshToken(user) {
-  return jwt.sign({ id: user._id }, JWT_REFRESH_SECRET, { expiresIn: '7d' });
-}
-
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader) return res.sendStatus(401);
-  const token = authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user;
-    next();
-  });
-}
-
 // --- Routes ---
-
-// Register
+// Registration
 app.post('/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
-    if (!username || !email || !password) return res.status(400).json({ message: 'Missing fields' });
 
-    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
-    if (existingUser) return res.status(400).json({ message: 'User or email already exists' });
+    if (!username || !email || !password)
+      return res.status(400).json({ message: 'Missing required fields' });
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const existingUser = await User.findOne({ email });
+    if (existingUser)
+      return res.status(400).json({ message: 'Email already registered' });
 
-    const user = new User({ username, email, passwordHash });
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    const user = new User({ username, email, passwordHash, balance: 1000 }); // Starting balance 1000
     await user.save();
 
-    res.status(201).json({ message: 'User registered successfully' });
+    res.json({ message: 'Registration successful' });
   } catch (err) {
-    console.error('Register error:', err);
+    console.error('Registration error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -445,88 +423,108 @@ app.post('/register', async (req, res) => {
 // Login
 app.post('/login', async (req, res) => {
   try {
-    const { usernameOrEmail, password } = req.body;
-    if (!usernameOrEmail || !password) return res.status(400).json({ message: 'Missing fields' });
+    const { email, password } = req.body;
 
-    const user = await User.findOne({ $or: [{ username: usernameOrEmail }, { email: usernameOrEmail }] });
-    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
+    const user = await User.findOne({ email });
+    if (!user)
+      return res.status(400).json({ message: 'Invalid email or password' });
 
-    const isValid = await bcrypt.compare(password, user.passwordHash);
-    if (!isValid) return res.status(400).json({ message: 'Invalid credentials' });
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
+    if (!isMatch)
+      return res.status(400).json({ message: 'Invalid email or password' });
 
-    const accessToken = generateAccessToken(user);
-    const refreshToken = generateRefreshToken(user);
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
 
-    user.refreshToken = refreshToken;
-    await user.save();
-
-    res.json({ accessToken, refreshToken, username: user.username, balance: user.balance });
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        balance: user.balance,
+      },
+    });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// Refresh token
-app.post('/token', async (req, res) => {
-  const { refreshToken } = req.body;
-  if (!refreshToken) return res.status(401).json({ message: 'No refresh token provided' });
-
+// Get user profile
+app.get('/profile', async (req, res) => {
   try {
-    const payload = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
-    const user = await User.findById(payload.id);
-    if (!user || user.refreshToken !== refreshToken) return res.status(403).json({ message: 'Invalid refresh token' });
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token)
+      return res.status(401).json({ message: 'Unauthorized' });
 
-    const accessToken = generateAccessToken(user);
-    res.json({ accessToken });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-passwordHash -resetPasswordToken -resetPasswordExpires');
+    if (!user)
+      return res.status(404).json({ message: 'User not found' });
+
+    res.json(user);
   } catch (err) {
-    return res.status(403).json({ message: 'Invalid refresh token' });
+    console.error('Profile fetch error:', err);
+    res.status(401).json({ message: 'Invalid token' });
   }
 });
 
-// Logout
-app.post('/logout', authenticateToken, async (req, res) => {
+// Password reset request
+app.post('/reset-password', async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(400).json({ message: 'User not found' });
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    if (!user)
+      return res.status(404).json({ message: 'User not found' });
 
-    user.refreshToken = null;
+    // Create token and expiration
+    const token = crypto.randomBytes(20).toString('hex');
+    user.resetPasswordToken = token;
+    user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
     await user.save();
 
-    res.json({ message: 'Logged out' });
+    // Here you would send email with the reset link containing token
+    // For demo, just respond with token
+    res.json({ message: 'Password reset token generated', token });
   } catch (err) {
+    console.error('Reset password error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// Get user balance
-app.get('/balance', authenticateToken, async (req, res) => {
+// Password reset update
+app.post('/reset-password/:token', async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('balance');
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json({ balance: user.balance });
+    const { token } = req.params;
+    const { newPassword } = req.body;
+
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: Date.now() },
+    });
+    if (!user)
+      return res.status(400).json({ message: 'Invalid or expired token' });
+
+    const salt = await bcrypt.genSalt(10);
+    user.passwordHash = await bcrypt.hash(newPassword, salt);
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+
+    await user.save();
+
+    res.json({ message: 'Password reset successful' });
   } catch (err) {
+    console.error('Reset password update error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// Admin endpoints
-app.get('/admin/users', authenticateToken, async (req, res) => {
-  if (!req.user.isAdmin) return res.status(403).json({ message: 'Access denied' });
-  const users = await User.find({}, 'username email balance isAdmin');
-  res.json(users);
-});
-
-// --- Connect to MongoDB and start server ---
-const PORT = process.env.PORT || 4000;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/casino';
-
-mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+// --- MongoDB connection and server start ---
+mongoose
+  .connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => {
-    server.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-    });
+    console.log('MongoDB connected');
+    const PORT = process.env.PORT || 5000;
+    server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   })
-  .catch(err => {
-    console.error('MongoDB connection error:', err);
-  });
+  .catch(err => console.error('MongoDB connection error:', err));
