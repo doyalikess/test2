@@ -3,7 +3,8 @@ const router = express.Router();
 
 // Example user data and balance (replace with your real user logic/db)
 let users = {
-  'user1': { id: 'user1', balance: 1000, recentGames: [] }
+  'user1': { username: 'user1', balance: 1000, recentGames: [] },
+  // Add more users as needed
 };
 
 // Helper: simulate roulette spin
@@ -15,10 +16,10 @@ function spinRoulette() {
 
 // POST /roulette
 router.post('/roulette', (req, res) => {
-  let { userId, betAmount, betType, betValue } = req.body;
+  let { username, betAmount, betType, betValue } = req.body;
 
   // Basic input validation
-  if (!userId || !betAmount || !betType || betValue === undefined) {
+  if (!username || !betAmount || !betType || betValue === undefined) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
@@ -31,12 +32,12 @@ router.post('/roulette', (req, res) => {
   // Normalize betType and betValue to string lowercase for consistent comparison
   betType = String(betType).toLowerCase();
   if (typeof betValue === 'number') {
-    // If number, keep as number (for 'number' bets)
+    // keep as number for 'number' betType
   } else {
     betValue = String(betValue).toLowerCase();
   }
 
-  const user = users[userId];
+  const user = users[username];  // Use username as key
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
@@ -50,14 +51,12 @@ router.post('/roulette', (req, res) => {
   let won = false;
   let payout = 0;
 
-  // Payout logic
   if (betType === 'color') {
     if (betValue === spin.color) {
       won = true;
       payout = betAmount * 2;
     }
   } else if (betType === 'number') {
-    // betValue should be number between 0-36
     const betNum = Number(betValue);
     if (!isNaN(betNum) && betNum === spin.number) {
       won = true;
@@ -75,8 +74,7 @@ router.post('/roulette', (req, res) => {
     return res.status(400).json({ error: 'Invalid bet type' });
   }
 
-  // Update user balance:
-  // Deduct bet first, then add payout if won
+  // Update user balance
   user.balance -= betAmount;
   if (won) {
     user.balance += payout;
