@@ -1,28 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose');
-
-// Define User schema and model
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  balance: { type: Number, default: 1000 },
-  recentGames: [
-    {
-      betType: String,
-      betValue: mongoose.Schema.Types.Mixed,  // number or string
-      betAmount: Number,
-      spinResult: {
-        number: Number,
-        color: String,
-      },
-      won: Boolean,
-      payout: Number,
-      createdAt: { type: Date, default: Date.now },
-    },
-  ],
-});
-
-const User = mongoose.model('User', userSchema);
+const User = require('../models/User');  // Import your User mongoose model
 
 // Helper: simulate roulette spin
 function spinRoulette() {
@@ -31,26 +9,29 @@ function spinRoulette() {
   return { number, color };
 }
 
-// POST /game/roulette
+// POST /api/game/roulette
 router.post('/game/roulette', async (req, res) => {
   try {
     let { username, betAmount, betType, betValue } = req.body;
 
+    // Basic input validation
     if (!username || !betAmount || !betType || betValue === undefined) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Convert betAmount to number
     betAmount = Number(betAmount);
     if (isNaN(betAmount) || betAmount <= 0) {
       return res.status(400).json({ error: 'Invalid bet amount' });
     }
 
+    // Normalize betType and betValue to lowercase for consistency
     betType = String(betType).toLowerCase();
     if (typeof betValue !== 'number') {
       betValue = String(betValue).toLowerCase();
     }
 
-    // Find user by username in MongoDB
+    // Find user by username from MongoDB
     const user = await User.findOne({ username });
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -65,6 +46,7 @@ router.post('/game/roulette', async (req, res) => {
     let won = false;
     let payout = 0;
 
+    // Payout logic
     if (betType === 'color') {
       if (betValue === spin.color) {
         won = true;
@@ -88,10 +70,11 @@ router.post('/game/roulette', async (req, res) => {
       return res.status(400).json({ error: 'Invalid bet type' });
     }
 
-    // Update user balance and recentGames in MongoDB
+    // Update user balance
     user.balance -= betAmount;
     if (won) user.balance += payout;
 
+    // Save recent games (max 5)
     user.recentGames.unshift({
       betType,
       betValue,
@@ -101,11 +84,7 @@ router.post('/game/roulette', async (req, res) => {
       payout: won ? payout : 0,
       createdAt: new Date(),
     });
-
-    // Keep only last 5 games
-    if (user.recentGames.length > 5) {
-      user.recentGames = user.recentGames.slice(0, 5);
-    }
+    if (user.recentGames.length > 5) user.recentGames.pop();
 
     await user.save();
 
@@ -117,9 +96,9 @@ router.post('/game/roulette', async (req, res) => {
       recentGames: user.recentGames,
     });
 
-  } catch (err) {
-    console.error('Error in /game/roulette:', err);
-    res.status(500).json({ error: 'Internal server error' });
+  } catch (error) {
+    console.error('Roulette error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
