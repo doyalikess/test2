@@ -59,7 +59,7 @@ router.post('/roulette', authMiddleware, async (req, res) => {
     let { betAmount, bets } = req.body;
 
     // Validate input
-    if (!betAmount || !bets || !Array.isArray(bets) {
+    if (!betAmount || !bets || !Array.isArray(bets)) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
