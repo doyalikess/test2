@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -453,16 +452,6 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-
-// ... your entire existing code above ...
-
-// Add this line at the top with your requires:
-const rouletteRouter = require('./routes/roulettegame');
-
-// ... your existing code ...
-
-// Mount roulette routes under /api/game
-app.use('/api/game', rouletteRouter);
 
 // Start server with Socket.IO
 const PORT = process.env.PORT || 5000;
