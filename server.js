@@ -222,6 +222,12 @@ function authMiddleware(req, res, next) {
 
 // === Routes ===
 
+// Import the roulette router at the top
+const rouletteRouter = require('./roulettegame.js');
+
+// Mount the roulette routes
+app.use('/api/game', rouletteRouter);
+
 // Signup
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password } = req.body;
