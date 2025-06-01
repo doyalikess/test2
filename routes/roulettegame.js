@@ -56,9 +56,10 @@ function spinRoulette() {
 // 🎯 POST /api/game/roulette
 router.post('/roulette', authMiddleware, async (req, res) => {
   try {
-    let { betAmount, betType, betValue } = req.body;
+    let { betAmount, bets } = req.body;
 
-    if (!betAmount || !betType || betValue === undefined) {
+    // Validate input
+    if (!betAmount || !bets || !Array.isArray(bets) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
@@ -67,9 +68,16 @@ router.post('/roulette', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid bet amount' });
     }
 
-    betType = String(betType).toLowerCase();
-    if (typeof betValue !== 'number') {
-      betValue = String(betValue).toLowerCase();
+    // Validate each bet in the bets array
+    for (const bet of bets) {
+      if (!bet.type || bet.value === undefined) {
+        return res.status(400).json({ error: 'Each bet must have type and value' });
+      }
+      
+      bet.type = String(bet.type).toLowerCase();
+      if (typeof bet.value !== 'number') {
+        bet.value = String(bet.value).toLowerCase();
+      }
     }
 
     const user = await User.findById(req.userId);
@@ -77,48 +85,70 @@ router.post('/roulette', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    if (betAmount > user.balance) {
+    // Calculate total bet amount (betAmount per bet)
+    const totalBetAmount = betAmount * bets.length;
+    if (totalBetAmount > user.balance) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
 
     const spin = spinRoulette();
-    let won = false;
-    let payout = 0;
+    let totalPayout = 0;
+    const betResults = [];
 
-    if (betType === 'color') {
-      if (betValue === spin.color) {
-        won = true;
-        payout = betAmount * 2;
-      }
-    } else if (betType === 'number') {
-      const betNum = Number(betValue);
-      if (!isNaN(betNum) && betNum === spin.number) {
-        won = true;
-        payout = betAmount * 35;
-      }
-    } else if (betType === 'oddeven') {
-      if (spin.number !== 0) {
-        if ((betValue === 'odd' && spin.number % 2 === 1) ||
-            (betValue === 'even' && spin.number % 2 === 0)) {
+    // Process each bet
+    for (const bet of bets) {
+      let won = false;
+      let payout = 0;
+
+      if (bet.type === 'color') {
+        if (bet.value === spin.color) {
           won = true;
-          payout = betAmount * 2;
+          payout = betAmount * (bet.value === 'green' ? 35 : 2);
         }
+      } else if (bet.type === 'number') {
+        const betNum = Number(bet.value);
+        if (!isNaN(betNum) && betNum === spin.number) {
+          won = true;
+          payout = betAmount * 35;
+        }
+      } else if (bet.type === 'oddeven') {
+        if (spin.number !== 0) {
+          if ((bet.value === 'odd' && spin.number % 2 === 1) ||
+              (bet.value === 'even' && spin.number % 2 === 0)) {
+            won = true;
+            payout = betAmount * 2;
+          }
+        }
+      } else {
+        return res.status(400).json({ error: `Invalid bet type: ${bet.type}` });
       }
-    } else {
-      return res.status(400).json({ error: 'Invalid bet type' });
+
+      if (won) {
+        totalPayout += payout;
+      }
+
+      betResults.push({
+        betType: bet.type,
+        betValue: bet.value,
+        betAmount,
+        won,
+        payout: won ? payout : 0
+      });
     }
 
-    user.balance -= betAmount;
-    if (won) user.balance += payout;
+    // Update user balance
+    user.balance -= totalBetAmount;
+    if (totalPayout > 0) {
+      user.balance += totalPayout;
+    }
 
+    // Record game history
     user.recentGames = user.recentGames || [];
     user.recentGames.unshift({
-      betType,
-      betValue,
-      betAmount,
+      bets: betResults,
+      totalBetAmount,
       spinResult: spin,
-      won,
-      payout: won ? payout : 0,
+      totalPayout,
       createdAt: new Date(),
     });
     if (user.recentGames.length > 5) user.recentGames.pop();
@@ -127,8 +157,9 @@ router.post('/roulette', authMiddleware, async (req, res) => {
 
     res.json({
       spinResult: spin,
-      won,
-      payout: won ? payout : 0,
+      bets: betResults,
+      totalBetAmount,
+      totalPayout,
       newBalance: user.balance,
       recentGames: user.recentGames,
     });
