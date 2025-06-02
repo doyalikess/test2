@@ -441,7 +441,7 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
 });
 
 // Mount upgrader router under /api
-app.use('/api', upgraderRouter);
+app.use('/api/upgrader', upgraderRouter);
 
 // Start the server
 const PORT = process.env.PORT || 4000;
