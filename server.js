@@ -286,7 +286,7 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   }
 
   try {
-    const order_id = order_${Date.now()}_${req.userId};
+    const order_id = `order_${Date.now()}_${req.userId}`;
 
     const response = await axios.post(
       'https://api.nowpayments.io/v1/invoice',
@@ -406,7 +406,7 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
     await sender.save();
     await recipient.save();
 
-    res.json({ message: Successfully tipped ${amount} to ${recipientUsername} });
+    res.json({ message: `Successfully tipped ${amount} to ${recipientUsername}` });
   } catch (err) {
     console.error('Tip error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -457,5 +457,5 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
 // Start server with Socket.IO
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(🚀 Server running on port ${PORT});
+  console.log(`🚀 Server running on port ${PORT}`);
 });
