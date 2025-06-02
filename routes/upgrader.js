@@ -3,7 +3,7 @@
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middleware/auth'); // adjust if located elsewhere
-const User = require('../models/User'); // adjust path if necessary
+const User = require('../models/user'); // adjust path if necessary
 
 // Example upgrader game route
 router.post('/play', authMiddleware, async (req, res) => {
