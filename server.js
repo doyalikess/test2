@@ -222,10 +222,6 @@ function authMiddleware(req, res, next) {
 
 // === Routes ===
 
-// Import upgrader routes
-const upgraderRoutes = require('./routes/upgrader');
-app.use('/api/upgrader', upgraderRoutes);
-
 // Signup
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password } = req.body;
@@ -433,26 +429,44 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
     const win = outcome === choice;
 
-    const houseEdge = 0.02;
-    const payout = win ? amount * (1 - houseEdge) * 2 : 0;
+    const houseEdge = 0.05;
+    const payoutMultiplier = (1 - houseEdge) * 2;
 
-    user.balance += payout - amount;
+    if (win) {
+      user.balance += amount * (payoutMultiplier - 1);
+    } else {
+      user.balance -= amount;
+    }
+
     await user.save();
 
-    res.json({ outcome, win, payout, balance: user.balance });
+    res.json({
+      outcome,
+      win,
+      newBalance: user.balance,
+      serverSeed,
+      hash,
+    });
   } catch (err) {
-    console.error('Coinflip error:', err);
+    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// 404 fallback
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
+// Upgrade routes - added here
+const upgraderRouter = express.Router();
+
+// Upgrade user to a new tier (example)
+upgraderRouter.post('/upgrade', authMiddleware, async (req, res) => {
+  // Placeholder for upgrade logic
+  // Example: increase user's level, deduct balance, etc.
+  res.json({ message: 'Upgrade endpoint placeholder' });
 });
+
+app.use('/api/upgrader', upgraderRouter);
 
 // Start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Server listening on port ${PORT}`);
 });
