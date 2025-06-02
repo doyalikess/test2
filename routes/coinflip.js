@@ -24,7 +24,7 @@ const authenticate = async (req, res, next) => {
 function generateOutcome(seed) {
   const hash = crypto.createHash('sha256').update(seed).digest('hex');
   const result = parseInt(hash.slice(0, 8), 16);
-  return result % 100 < 47.5 ? 'heads' : 'tails'; // 5% house edge
+  return result % 100 < 49.25 ? 'heads' : 'tails'; // 1.5% house edge
 }
 
 // POST /api/game/coinflip
@@ -45,7 +45,7 @@ router.post('/coinflip', authenticate, async (req, res) => {
     const outcome = generateOutcome(serverSeed);
     const win = outcome === choice;
 
-    const houseEdge = 0.05;
+    const houseEdge = 0.015;  // Updated house edge to 1.5%
     const payoutMultiplier = (1 - houseEdge) * 2;
 
     if (win) {
