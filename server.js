@@ -1,4 +1,5 @@
 require('dotenv').config();
+const User = require('./models/user'); // adjust path if your file is somewhere else
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -188,22 +189,6 @@ mongoose
   });
 
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
-
-const UserSchema = new mongoose.Schema({
-  username: { type: String, unique: true, required: true },
-  passwordHash: { type: String, required: true },
-  balance: { type: Number, default: 0 },
-});
-
-UserSchema.methods.setPassword = async function (password) {
-  this.passwordHash = await bcrypt.hash(password, 10);
-};
-
-UserSchema.methods.validatePassword = async function (password) {
-  return await bcrypt.compare(password, this.passwordHash);
-};
-
-const User = mongoose.model('User', UserSchema);
 
 // Auth middleware
 function authMiddleware(req, res, next) {
