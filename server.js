@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -223,6 +222,10 @@ function authMiddleware(req, res, next) {
 
 // === Routes ===
 
+// Import upgrader routes
+const upgraderRoutes = require('./routes/upgrader');
+app.use('/api/upgrader', upgraderRoutes);
+
 // Signup
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password } = req.body;
@@ -430,31 +433,25 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
     const win = outcome === choice;
 
-    const houseEdge = 0.05;
-    const payoutMultiplier = (1 - houseEdge) * 2;
+    const houseEdge = 0.02;
+    const payout = win ? amount * (1 - houseEdge) * 2 : 0;
 
-    if (win) {
-      user.balance += amount * (payoutMultiplier - 1);
-    } else {
-      user.balance -= amount;
-    }
-
+    user.balance += payout - amount;
     await user.save();
 
-    res.json({
-      outcome,
-      win,
-      newBalance: user.balance,
-      serverSeed,
-      hash,
-    });
+    res.json({ outcome, win, payout, balance: user.balance });
   } catch (err) {
-    console.error(err);
+    console.error('Coinflip error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Start server with Socket.IO
+// 404 fallback
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// Start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
