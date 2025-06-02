@@ -204,7 +204,7 @@ function authMiddleware(req, res, next) {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.userId = decoded.userId;
+    req.userId = decoded.userId; // ensure userId is here (matches your token)
     next();
   } catch {
     res.status(401).json({ error: 'Invalid token' });
@@ -273,185 +273,173 @@ app.post('/api/coinflip', authMiddleware, async (req, res) => {
   const { bet, choice } = req.body;
   if (!bet || !choice) return res.status(400).json({ error: 'Bet and choice required' });
   if (bet <= 0) return res.status(400).json({ error: 'Invalid bet amount' });
+  if (!['heads', 'tails'].includes(choice)) return res.status(400).json({ error: 'Choice must be heads or tails' });
 
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
+
     if (user.balance < bet) return res.status(400).json({ error: 'Insufficient balance' });
 
-    user.balance -= bet;
+    // Simulate coin flip
+    const result = Math.random() < 0.5 ? 'heads' : 'tails';
+
+    if (result === choice) {
+      // User wins double the bet
+      user.balance += bet;
+    } else {
+      // User loses bet
+      user.balance -= bet;
+    }
+    user.wagered = (user.wagered || 0) + bet;
+
     await user.save();
 
-    const result = Math.random() < 0.5 ? 'heads' : 'tails';
-    let won = false;
-    let profit = 0;
-
-    if (choice === result) {
-      won = true;
-      profit = bet * 2;
-      user.balance += profit;
-      user.wagered += bet;
-      await user.save();
-    } else {
-      user.wagered += bet;
-      await user.save();
-    }
-
-    res.json({ result, won, profit, balance: user.balance });
+    res.json({ result, balance: user.balance });
   } catch (err) {
     console.error('Coinflip error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Roulette game (simplified)
+// Roulette game
 app.post('/api/roulette', authMiddleware, async (req, res) => {
   const { bet, choice } = req.body;
   if (!bet || !choice) return res.status(400).json({ error: 'Bet and choice required' });
   if (bet <= 0) return res.status(400).json({ error: 'Invalid bet amount' });
 
-  // Assuming choice is a color: 'red', 'black', or 'green'
-  const colors = ['red', 'black', 'green'];
-  if (!colors.includes(choice)) return res.status(400).json({ error: 'Invalid choice' });
+  const validColors = ['red', 'black', 'green'];
+  const validNumbers = Array.from({ length: 37 }, (_, i) => i.toString()); // "0" to "36"
+  if (![...validColors, ...validNumbers].includes(choice.toString())) {
+    return res.status(400).json({ error: 'Choice must be a color (red, black, green) or a number (0-36)' });
+  }
 
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
+
     if (user.balance < bet) return res.status(400).json({ error: 'Insufficient balance' });
 
-    user.balance -= bet;
-    await user.save();
+    // Spin the roulette
+    const spinNumber = Math.floor(Math.random() * 37); // 0-36
+    const colorsByNumber = {
+      0: 'green',
+      1: 'red',
+      2: 'black',
+      3: 'red',
+      4: 'black',
+      5: 'red',
+      6: 'black',
+      7: 'red',
+      8: 'black',
+      9: 'red',
+      10: 'black',
+      11: 'black',
+      12: 'red',
+      13: 'black',
+      14: 'red',
+      15: 'black',
+      16: 'red',
+      17: 'black',
+      18: 'red',
+      19: 'red',
+      20: 'black',
+      21: 'red',
+      22: 'black',
+      23: 'red',
+      24: 'black',
+      25: 'red',
+      26: 'black',
+      27: 'red',
+      28: 'black',
+      29: 'black',
+      30: 'red',
+      31: 'black',
+      32: 'red',
+      33: 'black',
+      34: 'red',
+      35: 'black',
+      36: 'red',
+    };
+    const spinColor = colorsByNumber[spinNumber];
 
-    // Simulate roulette outcome with weighted distribution: 18 red, 18 black, 1 green (0)
-    const outcomes = [
-      ...Array(18).fill('red'),
-      ...Array(18).fill('black'),
-      'green',
-    ];
-    const outcome = outcomes[Math.floor(Math.random() * outcomes.length)];
-
-    let won = false;
-    let profit = 0;
-
-    if (choice === outcome) {
-      won = true;
-      if (choice === 'green') {
-        profit = bet * 14; // 14:1 payout for green
-      } else {
-        profit = bet * 2; // 2:1 payout for red/black
-      }
-      user.balance += profit;
-      user.wagered += bet;
-      await user.save();
-    } else {
-      user.wagered += bet;
-      await user.save();
+    let winAmount = 0;
+    if (choice.toString() === spinNumber.toString()) {
+      // Exact number, payout 36x
+      winAmount = bet * 36;
+    } else if (validColors.includes(choice) && choice === spinColor) {
+      // Color match, payout 2x
+      winAmount = bet * 2;
     }
 
-    res.json({ outcome, won, profit, balance: user.balance });
+    if (winAmount > 0) {
+      user.balance += winAmount - bet; // add net win (payout minus original bet)
+    } else {
+      user.balance -= bet;
+    }
+
+    user.wagered = (user.wagered || 0) + bet;
+    await user.save();
+
+    res.json({
+      spinNumber,
+      spinColor,
+      winAmount,
+      balance: user.balance,
+    });
   } catch (err) {
     console.error('Roulette error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Deposit route with NOWPAYMENTS integration
-app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
+// Tip user
+app.post('/api/tip', authMiddleware, async (req, res) => {
+  const { toUsername, amount } = req.body;
+  if (!toUsername || !amount || amount <= 0) return res.status(400).json({ error: 'To username and positive amount required' });
+
   try {
-    const { amount, currency } = req.body;
-    if (!amount || !currency) return res.status(400).json({ error: 'Amount and currency required' });
+    const sender = await User.findById(req.userId);
+    if (!sender) return res.status(404).json({ error: 'Sender not found' });
 
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
 
-    const orderId = `id${Date.now()}uid${user._id}`;
-    const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY;
+    const receiver = await User.findOne({ username: toUsername });
+    if (!receiver) return res.status(404).json({ error: 'Recipient not found' });
 
-    const response = await axios.post(
-      'https://api.nowpayments.io/v1/invoice',
-      {
-        price_amount: amount,
-        price_currency: currency,
-        order_id: orderId,
-        ipn_callback_url: 'https://yourdomain.com/api/nowpayments-webhook',
-        success_url: 'https://yourdomain.com/success',
-        cancel_url: 'https://yourdomain.com/cancel',
-      },
-      {
-        headers: {
-          'x-api-key': NOWPAYMENTS_API_KEY,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    if (receiver._id.equals(sender._id)) return res.status(400).json({ error: 'Cannot tip yourself' });
 
-    if (response.status === 201 || response.status === 200) {
-      res.json(response.data);
-    } else {
-      res.status(response.status).json({ error: 'Failed to create payment invoice' });
-    }
+    sender.balance -= amount;
+    receiver.balance += amount;
+
+    await sender.save();
+    await receiver.save();
+
+    res.json({ message: `Tipped ${amount} to ${toUsername}`, balance: sender.balance });
   } catch (err) {
-    console.error('Deposit error:', err.response?.data || err.message);
-    res.status(500).json({ error: 'Server error during deposit' });
+    console.error('Tip error:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// NOWPAYMENTS webhook endpoint
-app.post('/api/nowpayments-webhook', async (req, res) => {
-  try {
-    const NOWPAYMENTS_WEBHOOK_SECRET = process.env.NOWPAYMENTS_WEBHOOK_SECRET;
-    const signature = req.headers['x-nowpayments-signature'];
-    const rawBody = req.rawBody || JSON.stringify(req.body);
+// Donation webhook with signature verification
+app.post('/api/donation', async (req, res) => {
+  const secret = process.env.DONATION_SECRET || '';
+  const signature = req.headers['x-signature'];
 
-    if (!signature || !NOWPAYMENTS_WEBHOOK_SECRET) {
-      return res.status(400).json({ error: 'Missing signature or secret' });
-    }
+  if (!signature) return res.status(400).json({ error: 'Signature header missing' });
+  if (!req.rawBody) return res.status(400).json({ error: 'Raw body missing' });
 
-    const hash = crypto
-      .createHmac('sha256', NOWPAYMENTS_WEBHOOK_SECRET)
-      .update(rawBody)
-      .digest('hex');
+  const computedSig = crypto.createHmac('sha256', secret).update(req.rawBody).digest('hex');
+  if (computedSig !== signature) return res.status(403).json({ error: 'Invalid signature' });
 
-    if (hash !== signature) {
-      return res.status(400).json({ error: 'Invalid signature' });
-    }
+  const donation = req.body;
+  console.log('Donation received:', donation);
 
-    const { payment_status, order_id, price_amount } = req.body;
+  // Here you could update user balances or stats if needed
 
-    if (payment_status === 'finished') {
-      // Extract user ID from order_id
-      const uidIndex = order_id.indexOf('uid');
-      if (uidIndex === -1) {
-        return res.status(400).json({ error: 'Invalid order_id format' });
-      }
-
-      const userId = order_id.slice(uidIndex + 3);
-
-      const user = await User.findById(userId);
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      user.balance += price_amount;
-      await user.save();
-
-      return res.status(200).json({ message: 'Payment processed' });
-    }
-
-    res.status(200).json({ message: 'Payment status not finished' });
-  } catch (err) {
-    console.error('Webhook error:', err);
-    res.status(500).json({ error: 'Server error processing webhook' });
-  }
+  res.json({ message: 'Donation verified' });
 });
 
-// Default route
-app.get('/', (req, res) => {
-  res.send('API is running...');
-});
-
-// Start server
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
-});
+const PORT = process.env.PORT || 4000;
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
