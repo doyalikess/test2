@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
+const rouletteRoutes = require('./routes/roulettegame');
 
 const app = express();
 const server = http.createServer(app);
@@ -413,6 +414,8 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
   }
 });
 
+// NEW: add this line below
+app.use('/api/game/roulette', rouletteRoutes);
 // Coinflip game endpoint
 app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
   const { amount, choice } = req.body;
