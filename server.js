@@ -9,6 +9,8 @@ const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
 
+const upgraderRouter = require('./routes/upgrader');
+
 const app = express();
 const server = http.createServer(app);
 
@@ -453,20 +455,11 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
   }
 });
 
-// Upgrade routes - added here
-const upgraderRouter = express.Router();
+// Mount upgrader router under /api
+app.use('/api', upgraderRouter);
 
-// Upgrade user to a new tier (example)
-upgraderRouter.post('/upgrade', authMiddleware, async (req, res) => {
-  // Placeholder for upgrade logic
-  // Example: increase user's level, deduct balance, etc.
-  res.json({ message: 'Upgrade endpoint placeholder' });
-});
-
-app.use('/api/upgrader', upgraderRouter);
-
-// Start server
-const PORT = process.env.PORT || 5000;
+// Start the server
+const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
