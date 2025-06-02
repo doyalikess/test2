@@ -17,5 +17,4 @@ UserSchema.methods.validatePassword = async function (password) {
   return await bcrypt.compare(password, this.passwordHash);
 };
 
-// Prevent OverwriteModelError by checking if the model already exists
-module.exports = mongoose.models.User || mongoose.model('User', UserSchema);
+module.exports = mongoose.model('User', UserSchema);
