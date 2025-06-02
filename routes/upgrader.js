@@ -2,11 +2,11 @@
 
 const express = require('express');
 const router = express.Router();
-const authMiddleware = require('../middleware/auth'); // adjust if located elsewhere
-const User = require('../models/user'); // adjust path if necessary
+const authMiddleware = require('../middleware/auth'); // Adjust if in a different location
+const User = require('../models/user'); // Adjust path if necessary
 
-// Example upgrader game route
-router.post('/play', authMiddleware, async (req, res) => {
+// POST /api/upgrader — Upgrader game endpoint
+router.post('/', authMiddleware, async (req, res) => {
   const { itemValue, multiplier } = req.body;
 
   if (!itemValue || !multiplier || itemValue <= 0 || multiplier <= 1) {
@@ -21,10 +21,10 @@ router.post('/play', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
 
-    // Deduct balance
+    // Deduct the item value from balance
     user.balance -= itemValue;
 
-    // Win logic (50% chance adjusted by multiplier)
+    // Winning chance is inversely proportional to multiplier
     const winChance = 100 / multiplier;
     const roll = Math.random() * 100;
     const win = roll < winChance;
