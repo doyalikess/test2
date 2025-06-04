@@ -384,6 +384,61 @@ app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
   }
 });
 
+// Withdraw endpoint
+app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
+  const { amount, currency, address } = req.body;
+  
+  if (!amount || !currency || !address) {
+    return res.status(400).json({ error: 'Amount, currency and address are required' });
+  }
+
+  const allowedCurrencies = ['BTC', 'ETH', 'USDT', 'LTC'];
+  if (!allowedCurrencies.includes(currency)) {
+    return res.status(400).json({ error: 'Unsupported currency' });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check balance
+    if (user.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+
+    // Deduct from balance
+    user.balance -= amount;
+    await user.save();
+
+    // Send Discord webhook notification
+    const discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
+    if (discordWebhookUrl) {
+      const embed = {
+        title: 'New Withdrawal Request',
+        color: 0xff0000,
+        fields: [
+          { name: 'User', value: user.username, inline: true },
+          { name: 'Amount', value: `$${amount}`, inline: true },
+          { name: 'Currency', value: currency, inline: true },
+          { name: 'Address', value: address },
+        ],
+        timestamp: new Date().toISOString(),
+      };
+
+      await axios.post(discordWebhookUrl, {
+        embeds: [embed],
+      });
+    }
+
+    res.json({ message: 'Withdrawal request submitted successfully' });
+  } catch (err) {
+    console.error('Withdrawal error:', err);
+    res.status(500).json({ error: 'Failed to process withdrawal' });
+  }
+});
+
 // === NEW TIP ENDPOINT ===
 app.post('/api/user/tip', authMiddleware, async (req, res) => {
   const { recipientUsername, amount } = req.body;
