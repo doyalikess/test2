@@ -271,6 +271,13 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Amount and currency are required' });
   }
 
+  const allowedCurrencies = ['BTC', 'ETH', 'USDT', 'LTC'];
+  const upperCurrency = currency.toUpperCase();
+
+  if (!allowedCurrencies.includes(upperCurrency)) {
+    return res.status(400).json({ error: 'Unsupported currency' });
+  }
+
   try {
     const order_id = `order_${Date.now()}_${req.userId}`;
 
@@ -278,10 +285,10 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
       'https://api.nowpayments.io/v1/invoice',
       {
         price_amount: amount,
-        price_currency: currency.toUpperCase(),
-        pay_currency: currency.toUpperCase(),
+        price_currency: 'USD', // Accept deposit amount in USD
+        pay_currency: upperCurrency, // Pay with selected crypto
         order_id: order_id,
-        order_description: 'Deposit',
+        order_description: 'Deposit via NOWPayments',
       },
       {
         headers: {
@@ -300,6 +307,7 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to create invoice with NOWPAYMENTS' });
   }
 });
+
 
 // NOWPAYMENTS webhook
 app.post('/api/nowpayments-webhook', async (req, res) => {
