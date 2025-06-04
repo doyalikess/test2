@@ -434,16 +434,16 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
 
     const serverSeed = crypto.randomBytes(16).toString('hex');
     const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
-    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 47.5 ? 'heads' : 'tails';
+    
+    // 46% chance to win (8% house edge)
+    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 46 ? 'heads' : 'tails';
     const win = outcome === choice;
 
-    const houseEdge = 0.05;
-    const payoutMultiplier = (1 - houseEdge) * 2;
-
+    // Payout is 1x (no multiplier)
     if (win) {
-      user.balance += amount * (payoutMultiplier - 1);
+      user.balance += amount; // Player wins their bet amount back (1x payout)
     } else {
-      user.balance -= amount;
+      user.balance -= amount; // Player loses their bet
     }
 
     await user.save();
