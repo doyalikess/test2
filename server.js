@@ -207,6 +207,19 @@ function authMiddleware(req, res, next) {
   }
 }
 
+// Add to server.js after auth middleware
+
+// Transaction history endpoint
+app.get('/api/user/transactions', authMiddleware, async (req, res) => {
+  try {
+    // In a real implementation, you'd have a Transaction model
+    // For now, we'll return an empty array
+    res.json([]);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // === Routes ===
 
 // Signup
