@@ -1,11 +1,10 @@
 // routes/upgrader.js
-
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middleware/auth'); // Adjust if in a different location
 const User = require('../models/user'); // Adjust path if necessary
 
-// POST /api/upgrader — Upgrader game endpoint
+// POST /api/upgrader — Upgrader game endpoint with 8% house edge
 router.post('/', authMiddleware, async (req, res) => {
   const { itemValue, multiplier } = req.body;
 
@@ -24,10 +23,14 @@ router.post('/', authMiddleware, async (req, res) => {
     // Deduct the item value from balance
     user.balance -= itemValue;
 
-    // Winning chance is inversely proportional to multiplier
-    const winChance = 100 / multiplier;
+    // Calculate base win chance (without house edge)
+    const baseWinChance = 100 / multiplier;
+    
+    // Apply 8% house edge (reduce win chance by 8%)
+    const winChanceWithHouseEdge = baseWinChance * (1 - 0.08); // 8% less chance to win
+    
     const roll = Math.random() * 100;
-    const win = roll < winChance;
+    const win = roll < winChanceWithHouseEdge;
 
     if (win) {
       const winAmount = itemValue * multiplier;
@@ -40,7 +43,7 @@ router.post('/', authMiddleware, async (req, res) => {
       win,
       newBalance: user.balance,
       result: win ? 'You won!' : 'You lost!',
-      chance: winChance.toFixed(2),
+      chance: winChanceWithHouseEdge.toFixed(2),
       roll: roll.toFixed(2),
     });
   } catch (err) {
