@@ -31,6 +31,23 @@ const jackpotGame = {
   totalPot: 0,
 };
 
+// Mines game state
+const minesGames = new Map(); // Stores active mines games by userId
+
+// Mines game helper functions
+function generateMinesPositions(gridSize, minesCount) {
+  const positions = new Set();
+  while (positions.size < minesCount) {
+    positions.add(Math.floor(Math.random() * gridSize * gridSize));
+  }
+  return Array.from(positions);
+}
+
+function calculateMultiplier(revealedCount, minesCount) {
+  const riskFactor = minesCount / 25; // For 5x5 grid
+  return (1 + (1 - riskFactor) * revealedCount * 0.1).toFixed(2);
+}
+
 async function startJackpotGame(io) {
   jackpotGame.isRunning = true;
   io.emit('jackpot_start');
@@ -122,6 +139,131 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('Join jackpot error:', err);
       socket.emit('jackpot_error', 'Server error while joining jackpot.');
+    }
+  });
+
+  // Mines game handlers
+  socket.on('mines_start', async ({ userId, betAmount, minesCount }) => {
+    try {
+      if (!betAmount || betAmount <= 0 || !minesCount || minesCount < 1 || minesCount > 24) {
+        socket.emit('mines_error', 'Invalid parameters');
+        return;
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('mines_error', 'User not found');
+        return;
+      }
+
+      if (user.balance < betAmount) {
+        socket.emit('mines_error', 'Insufficient balance');
+        return;
+      }
+
+      user.balance -= betAmount;
+      await user.save();
+
+      const gridSize = 5;
+      const minesPositions = generateMinesPositions(gridSize, minesCount);
+      
+      const game = {
+        userId,
+        betAmount,
+        minesCount,
+        gridSize,
+        minesPositions,
+        revealedPositions: [],
+        status: 'ongoing',
+        cashoutMultiplier: 1
+      };
+
+      minesGames.set(userId, game);
+
+      socket.emit('mines_started', {
+        gridSize,
+        minesCount,
+        initialBalance: user.balance
+      });
+    } catch (err) {
+      console.error('Mines start error:', err);
+      socket.emit('mines_error', 'Server error');
+    }
+  });
+
+  socket.on('mines_reveal', async ({ userId, position }) => {
+    try {
+      const game = minesGames.get(userId);
+      if (!game || game.status !== 'ongoing') {
+        socket.emit('mines_error', 'No active game');
+        return;
+      }
+
+      if (game.revealedPositions.includes(position)) {
+        socket.emit('mines_error', 'Position already revealed');
+        return;
+      }
+
+      if (game.minesPositions.includes(position)) {
+        game.status = 'busted';
+        minesGames.delete(userId);
+        
+        socket.emit('mines_busted', {
+          minePositions: game.minesPositions,
+          lostAmount: game.betAmount
+        });
+        return;
+      }
+
+      game.revealedPositions.push(position);
+      
+      game.cashoutMultiplier = calculateMultiplier(
+        game.revealedPositions.length,
+        game.minesCount
+      );
+
+      socket.emit('mines_revealed', {
+        position,
+        isMine: false,
+        cashoutMultiplier: game.cashoutMultiplier,
+        revealedPositions: game.revealedPositions
+      });
+    } catch (err) {
+      console.error('Mines reveal error:', err);
+      socket.emit('mines_error', 'Server error');
+    }
+  });
+
+  socket.on('mines_cashout', async ({ userId }) => {
+    try {
+      const game = minesGames.get(userId);
+      if (!game || game.status !== 'ongoing') {
+        socket.emit('mines_error', 'No active game to cashout');
+        return;
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('mines_error', 'User not found');
+        return;
+      }
+
+      const winnings = game.betAmount * game.cashoutMultiplier;
+      user.balance += winnings;
+      await user.save();
+
+      minesGames.delete(userId);
+
+      socket.emit('mines_cashed_out', {
+        winnings,
+        newBalance: user.balance,
+        cashoutMultiplier: game.cashoutMultiplier,
+        revealedPositions: game.revealedPositions,
+        minePositions: game.minesPositions
+      });
+    } catch (err) {
+      console.error('Mines cashout error:', err);
+      socket.emit('mines_error', 'Server error');
     }
   });
 
