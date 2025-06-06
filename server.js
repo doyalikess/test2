@@ -9,6 +9,8 @@ const crypto = require('crypto');
 const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
+const minesRouter = require('./routes/mines');
+app.use('/game/mines', minesRouter);
 
 const upgraderRouter = require('./routes/upgrader');
 
