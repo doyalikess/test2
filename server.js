@@ -1,5 +1,6 @@
 require('dotenv').config();
 const User = require('./models/user');
+const MinesGame = require('./models/mines');
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -11,6 +12,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 const upgraderRouter = require('./routes/upgrader');
+const minesRouter = require('./routes/mines'); // Add mines router
 
 const app = express();
 const server = http.createServer(app);
@@ -645,6 +647,9 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
 
 // Mount upgrader router
 app.use('/api/upgrader', upgraderRouter);
+
+// Mount mines router
+app.use('/game/mines', minesRouter);
 
 // Start the server
 const PORT = process.env.PORT || 4000;
