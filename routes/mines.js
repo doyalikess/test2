@@ -1,22 +1,27 @@
 const express = require('express');
 const router = express.Router();
-const Game = require('../models/Game');
+const MinesGame = require('../models/mines');
 const User = require('../models/User');
 
-// Helper function to generate mines positions
+// Helper function to generate mines positions for 5x5 grid
 const generateMines = (count) => {
   const positions = new Set();
   while (positions.size < count) {
-    positions.add(Math.floor(Math.random() * 25));
+    positions.add(Math.floor(Math.random() * 25)); // 0-24 for 5x5 grid
   }
   return Array.from(positions);
 };
 
 // Calculate multiplier based on revealed tiles and mines count
 const calculateMultiplier = (revealedCount, minesCount) => {
-  const riskFactor = minesCount / 25;
-  const tilesLeft = 25 - minesCount - revealedCount;
-  return (1 + (1 - riskFactor) * revealedCount / (tilesLeft + 1)).toFixed(2);
+  const totalTiles = 25;
+  const safeTiles = totalTiles - minesCount;
+  const remainingSafeTiles = safeTiles - revealedCount;
+  
+  // Base multiplier formula - adjust as needed for your game economy
+  const multiplier = 1 + (minesCount / safeTiles) * (revealedCount / (remainingSafeTiles + 1));
+  
+  return parseFloat(multiplier.toFixed(2));
 };
 
 // Start a new mines game
@@ -40,14 +45,12 @@ router.post('/', async (req, res) => {
     }
 
     // Deduct bet amount from user balance
-    user.balance -= amount;
+    user.balance = parseFloat((user.balance - amount).toFixed(2));
     await user.save();
 
     // Create new game
-    const game = new Game({
+    const game = new MinesGame({
       userId: user._id,
-      username,
-      gameType: 'mines',
       betAmount: amount,
       minesCount,
       minesPositions: generateMines(minesCount),
@@ -82,7 +85,7 @@ router.post('/reveal', async (req, res) => {
     }
 
     // Find game and user
-    const game = await Game.findById(gameId);
+    const game = await MinesGame.findById(gameId);
     const user = await User.findOne({ username });
 
     if (!game || !user) {
@@ -95,13 +98,8 @@ router.post('/reveal', async (req, res) => {
     }
 
     // Check if position is already revealed
-    if (game.revealedPositions && game.revealedPositions.includes(position)) {
+    if (game.revealedPositions.includes(position)) {
       return res.status(400).json({ error: 'Position already revealed' });
-    }
-
-    // Initialize revealedPositions if not exists
-    if (!game.revealedPositions) {
-      game.revealedPositions = [];
     }
 
     // Check if position is a mine
@@ -148,7 +146,7 @@ router.post('/cashout', async (req, res) => {
     }
 
     // Find game and user
-    const game = await Game.findById(gameId);
+    const game = await MinesGame.findById(gameId);
     const user = await User.findOne({ username });
 
     if (!game || !user) {
@@ -161,10 +159,9 @@ router.post('/cashout', async (req, res) => {
     }
 
     // Calculate winnings
-    const winnings = game.betAmount * game.cashoutMultiplier;
-    user.balance += winnings;
+    const winnings = parseFloat((game.betAmount * game.cashoutMultiplier).toFixed(2));
+    user.balance = parseFloat((user.balance + winnings).toFixed(2));
     game.status = 'cashed_out';
-    game.winAmount = winnings;
 
     await Promise.all([user.save(), game.save()]);
 
