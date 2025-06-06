@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const MinesGame = require('../models/mines');
-const User = require('../models/User');
+const User = require('../models/user');
 
 // Helper function to generate mines positions for 5x5 grid
 const generateMines = (count) => {
