@@ -34,6 +34,9 @@ const jackpotGame = {
 // Mines game state
 const minesGames = new Map(); // Stores active mines games by userId
 
+// Limbo game state
+const limboGames = new Map(); // Stores active limbo games by userId
+
 // Mines game helper functions
 function generateMinesPositions(gridSize, minesCount) {
   const positions = new Set();
@@ -46,6 +49,22 @@ function generateMinesPositions(gridSize, minesCount) {
 function calculateMultiplier(revealedCount, minesCount) {
   const riskFactor = minesCount / 25; // For 5x5 grid
   return (1 + (1 - riskFactor) * revealedCount * 0.1).toFixed(2);
+}
+
+// Limbo game helper functions
+function generateLimboResult() {
+  // Using cryptographically secure random number
+  const randomBuffer = crypto.randomBytes(4);
+  const randomValue = randomBuffer.readUInt32LE(0) / 0xFFFFFFFF;
+  
+  // Limbo result between 1.00x and 1000000.00x with exponential distribution
+  const result = 1 + (1000000 - 1) * Math.pow(randomValue, 2);
+  return parseFloat(result.toFixed(2));
+}
+
+function calculateLimboWinChance(targetMultiplier) {
+  // The chance to win is 1/targetMultiplier
+  return (1 / targetMultiplier) * 100;
 }
 
 async function startJackpotGame(io) {
@@ -264,6 +283,104 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('Mines cashout error:', err);
       socket.emit('mines_error', 'Server error');
+    }
+  });
+
+  // Limbo game handlers
+  socket.on('limbo_start', async ({ userId, betAmount, targetMultiplier }) => {
+    try {
+      if (!betAmount || betAmount <= 0 || !targetMultiplier || targetMultiplier < 1.01) {
+        socket.emit('limbo_error', 'Invalid parameters');
+        return;
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('limbo_error', 'User not found');
+        return;
+      }
+
+      if (user.balance < betAmount) {
+        socket.emit('limbo_error', 'Insufficient balance');
+        return;
+      }
+
+      // Deduct balance immediately
+      user.balance -= betAmount;
+      await user.save();
+
+      const game = {
+        userId,
+        betAmount,
+        targetMultiplier,
+        status: 'pending',
+        winChance: calculateLimboWinChance(targetMultiplier),
+        serverSeed: crypto.randomBytes(16).toString('hex'),
+        clientSeed: crypto.randomBytes(16).toString('hex'),
+        nonce: 0
+      };
+
+      limboGames.set(userId, game);
+
+      socket.emit('limbo_started', {
+        betAmount,
+        targetMultiplier,
+        winChance: game.winChance,
+        currentBalance: user.balance
+      });
+    } catch (err) {
+      console.error('Limbo start error:', err);
+      socket.emit('limbo_error', 'Server error');
+    }
+  });
+
+  socket.on('limbo_play', async ({ userId }) => {
+    try {
+      const game = limboGames.get(userId);
+      if (!game || game.status !== 'pending') {
+        socket.emit('limbo_error', 'No active game');
+        return;
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('limbo_error', 'User not found');
+        return;
+      }
+
+      // Generate the game result
+      const result = generateLimboResult();
+      const win = result >= game.targetMultiplier;
+      const payout = win ? game.betAmount * game.targetMultiplier : 0;
+
+      // Update user balance if they won
+      if (win) {
+        user.balance += payout;
+        await user.save();
+      }
+
+      // Update game status
+      game.status = 'completed';
+      game.result = result;
+      game.win = win;
+      game.payout = payout;
+
+      socket.emit('limbo_result', {
+        result,
+        win,
+        payout,
+        targetMultiplier: game.targetMultiplier,
+        newBalance: user.balance,
+        serverSeed: game.serverSeed,
+        clientSeed: game.clientSeed,
+        nonce: game.nonce
+      });
+
+      // Remove completed game
+      limboGames.delete(userId);
+    } catch (err) {
+      console.error('Limbo play error:', err);
+      socket.emit('limbo_error', 'Server error');
     }
   });
 
