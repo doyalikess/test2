@@ -1,18 +1,32 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const User = require('../models/user');
 const Wager = require('../models/wager');
 
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
 
-// Auth middleware - you'll need to import this from your main file or auth module
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'; // replace with your secret in production
+
+// Auth middleware using Bearer token JWT
 function authMiddleware(req, res, next) {
-  if (!req.userId) {
-    return res.status(401).json({ error: 'Authentication required' });
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'No token provided' });
   }
-  next();
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.userId;  // assumes your token has userId claim
+    next();
+  } catch (err) {
+    return res.status(403).json({ error: 'Invalid or expired token' });
+  }
 }
 
 // Get user's referral code
