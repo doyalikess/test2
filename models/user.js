@@ -1,89 +1,78 @@
+// This is an example of what your models/user.js file should look like
+// with the referral and wagering tracking fields added.
+
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
-const crypto = require('crypto');
 
-const UserSchema = new mongoose.Schema({
-  username: { 
-    type: String, 
-    unique: true, 
-    required: true 
-  },
-  passwordHash: { 
-    type: String, 
-    required: true 
-  },
-  balance: { 
-    type: Number, 
-    default: 0 
-  },
-  // Referral System Fields
-  referralCode: { 
-    type: String, 
+const userSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: true,
     unique: true,
-    default: function() {
-      return crypto.randomBytes(4).toString('hex').toUpperCase();
-    }
+    trim: true,
+    minlength: 3,
+    maxlength: 30
   },
-  referredBy: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User' 
+  passwordHash: {
+    type: String,
+    required: true
   },
-  pendingReferralChange: {
-    newReferrer: { 
-      type: mongoose.Schema.Types.ObjectId, 
-      ref: 'User' 
-    },
-    expiresAt: { 
-      type: Date 
-    }
+  balance: {
+    type: Number,
+    default: 0
   },
-  // Wagering Stats
-  totalWagered: { 
-    type: Number, 
-    default: 0 
+  createdAt: {
+    type: Date,
+    default: Date.now
   },
-  referralEarnings: { 
-    type: Number, 
-    default: 0 
+  lastLogin: {
+    type: Date,
+    default: Date.now
   },
-  signupBonusReceived: { 
-    type: Boolean, 
-    default: false 
+  // New fields for referral system
+  referralCode: {
+    type: String,
+    unique: true,
+    sparse: true
   },
-  // Timestamps
-  createdAt: { 
-    type: Date, 
-    default: Date.now 
+  referredBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
   },
-  lastWagerTime: { 
-    type: Date 
+  referralCount: {
+    type: Number,
+    default: 0
+  },
+  referralEarnings: {
+    type: Number,
+    default: 0
+  },
+  // Track total wagered amount
+  totalWagered: {
+    type: Number,
+    default: 0
   }
 });
 
-// Password hashing method
-UserSchema.methods.setPassword = async function(password) {
+// Method to set password
+userSchema.methods.setPassword = async function(password) {
   this.passwordHash = await bcrypt.hash(password, 10);
 };
 
-// Password validation method
-UserSchema.methods.validatePassword = async function(password) {
+// Method to validate password
+userSchema.methods.validatePassword = async function(password) {
   return await bcrypt.compare(password, this.passwordHash);
 };
 
-// Generate a referral link method
-UserSchema.methods.getReferralLink = function() {
-  return `${process.env.BASE_URL}/signup?ref=${this.referralCode}`;
+// Generate unique referral code for user
+userSchema.methods.generateReferralCode = function() {
+  // Generate a code based on username and a random string
+  const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
+  this.referralCode = `${this.username.substring(0, 3).toUpperCase()}${randomStr}`;
+  return this.save();
 };
 
-// Virtual for referral count (not stored in DB)
-UserSchema.virtual('referralCount').get(async function() {
-  return await mongoose.model('User').countDocuments({ referredBy: this._id });
-});
+const User = mongoose.model('User', userSchema);
 
-// Indexes for better performance
-UserSchema.index({ referralCode: 1 });
-UserSchema.index({ referredBy: 1 });
-UserSchema.index({ totalWagered: -1 });
-UserSchema.index({ referralEarnings: -1 });
-
-module.exports = mongoose.models.User || mongoose.model('User', UserSchema);
+module.exports = User;
