@@ -7,7 +7,7 @@ const User = require('../models/user');
 const Wager = require('../models/wager');
 
 // Set referral reward percentage
-const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
+const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'; // replace with your secret in production
 
