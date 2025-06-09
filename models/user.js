@@ -1,78 +1,213 @@
-// This is an example of what your models/user.js file should look like
-// with the referral and wagering tracking fields added.
-
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 
-const userSchema = new mongoose.Schema({
-  username: {
-    type: String,
-    required: true,
+// Define referral reward percentage constant
+const REFERRAL_REWARD_PERCENT = 1; // 1% commission on wagers
+
+const UserSchema = new mongoose.Schema({
+  username: { 
+    type: String, 
+    unique: true, 
+    required: true 
+  },
+  passwordHash: { 
+    type: String, 
+    required: true 
+  },
+  balance: { 
+    type: Number, 
+    default: 0 
+  },
+  // Referral System Fields
+  referralCode: { 
+    type: String, 
     unique: true,
-    trim: true,
-    minlength: 3,
-    maxlength: 30
+    default: function() {
+      return crypto.randomBytes(4).toString('hex').toUpperCase();
+    }
   },
-  passwordHash: {
-    type: String,
-    required: true
-  },
-  balance: {
-    type: Number,
-    default: 0
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  lastLogin: {
-    type: Date,
-    default: Date.now
-  },
-  // New fields for referral system
-  referralCode: {
-    type: String,
-    unique: true,
-    sparse: true
-  },
-  referredBy: {
-    type: mongoose.Schema.Types.ObjectId,
+  referredBy: { 
+    type: mongoose.Schema.Types.ObjectId, 
     ref: 'User',
     default: null
   },
+  pendingReferralChange: {
+    newReferrer: { 
+      type: mongoose.Schema.Types.ObjectId, 
+      ref: 'User' 
+    },
+    expiresAt: { 
+      type: Date 
+    }
+  },
+  // Wagering Stats
+  totalWagered: { 
+    type: Number, 
+    default: 0 
+  },
+  referralEarnings: { 
+    type: Number, 
+    default: 0 
+  },
+  // Track the number of referred users
   referralCount: {
     type: Number,
     default: 0
   },
-  referralEarnings: {
+  signupBonusReceived: { 
+    type: Boolean, 
+    default: false 
+  },
+  // Game stats
+  gamesPlayed: {
     type: Number,
     default: 0
   },
-  // Track total wagered amount
-  totalWagered: {
+  gamesWon: {
     type: Number,
     default: 0
+  },
+  gamesLost: {
+    type: Number,
+    default: 0
+  },
+  totalProfit: {
+    type: Number,
+    default: 0
+  },
+  highestWin: {
+    type: Number,
+    default: 0
+  },
+  // Timestamps
+  createdAt: { 
+    type: Date, 
+    default: Date.now 
+  },
+  lastWagerTime: { 
+    type: Date 
+  },
+  lastLoginTime: {
+    type: Date
   }
 });
 
-// Method to set password
-userSchema.methods.setPassword = async function(password) {
+// Password hashing method
+UserSchema.methods.setPassword = async function(password) {
   this.passwordHash = await bcrypt.hash(password, 10);
 };
 
-// Method to validate password
-userSchema.methods.validatePassword = async function(password) {
+// Password validation method
+UserSchema.methods.validatePassword = async function(password) {
   return await bcrypt.compare(password, this.passwordHash);
 };
 
-// Generate unique referral code for user
-userSchema.methods.generateReferralCode = function() {
-  // Generate a code based on username and a random string
-  const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
-  this.referralCode = `${this.username.substring(0, 3).toUpperCase()}${randomStr}`;
+// Generate a referral link method
+UserSchema.methods.getReferralLink = function() {
+  return `${process.env.BASE_URL || 'https://dgenrand0.vercel.app'}/signup?ref=${this.referralCode}`;
+};
+
+// Track a new wager
+UserSchema.methods.trackWager = async function(amount, gameType) {
+  this.totalWagered += amount;
+  this.gamesPlayed += 1;
+  this.lastWagerTime = new Date();
+  
+  // If user was referred, update referrer's earnings
+  if (this.referredBy) {
+    const referralReward = amount * (REFERRAL_REWARD_PERCENT / 100);
+    
+    // Find and update referrer
+    const referrer = await mongoose.model('User').findById(this.referredBy);
+    if (referrer) {
+      referrer.referralEarnings += referralReward;
+      await referrer.save();
+    }
+  }
+  
   return this.save();
 };
 
-const User = mongoose.model('User', userSchema);
+// Record game outcome
+UserSchema.methods.recordGameOutcome = async function(win, profit) {
+  if (win) {
+    this.gamesWon += 1;
+    this.totalProfit += profit;
+    
+    // Update highest win if this is a new record
+    if (profit > this.highestWin) {
+      this.highestWin = profit;
+    }
+  } else {
+    this.gamesLost += 1;
+    this.totalProfit -= Math.abs(profit);
+  }
+  
+  return this.save();
+};
 
-module.exports = User;
+// Get statistics about referrals
+UserSchema.methods.getReferralStats = async function() {
+  // Get users referred by this user
+  const referredUsers = await mongoose.model('User').find({ referredBy: this._id })
+    .select('username totalWagered createdAt -_id');
+    
+  // Calculate potential earnings from total wagers of referred users
+  const totalReferredWagered = referredUsers.reduce((sum, user) => sum + user.totalWagered, 0);
+  const potentialEarnings = totalReferredWagered * (REFERRAL_REWARD_PERCENT / 100);
+  
+  // Calculate pending rewards (not yet added to referralEarnings)
+  const pendingRewards = Math.max(0, potentialEarnings - this.referralEarnings);
+  
+  return {
+    referralCode: this.referralCode,
+    referralLink: this.getReferralLink(),
+    totalReferrals: this.referralCount,
+    referralEarnings: this.referralEarnings,
+    pendingRewards: pendingRewards,
+    referredUsers: referredUsers.map(u => ({
+      username: u.username,
+      totalWagered: u.totalWagered,
+      joinedAt: u.createdAt,
+      commission: (u.totalWagered * REFERRAL_REWARD_PERCENT / 100).toFixed(2)
+    }))
+  };
+};
+
+// Apply a referral code
+UserSchema.statics.applyReferralCode = async function(userId, referralCode) {
+  // Find the user who is being referred
+  const user = await this.findById(userId);
+  if (!user) throw new Error('User not found');
+  
+  // Check if user already has a referrer
+  if (user.referredBy) throw new Error('User already has a referrer');
+  
+  // Find the referrer by referral code
+  const referrer = await this.findOne({ referralCode });
+  if (!referrer) throw new Error('Invalid referral code');
+  
+  // Make sure user isn't referring themselves
+  if (referrer._id.toString() === userId) throw new Error('Cannot refer yourself');
+  
+  // Update user with referrer
+  user.referredBy = referrer._id;
+  await user.save();
+  
+  // Increment referrer's count
+  referrer.referralCount += 1;
+  await referrer.save();
+  
+  return { user, referrer };
+};
+
+// Indexes for better performance
+UserSchema.index({ referralCode: 1 });
+UserSchema.index({ referredBy: 1 });
+UserSchema.index({ totalWagered: -1 });
+UserSchema.index({ referralEarnings: -1 });
+UserSchema.index({ referralCount: -1 });
+UserSchema.index({ gamesPlayed: -1 });
+
+module.exports = mongoose.models.User || mongoose.model('User', UserSchema);
