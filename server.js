@@ -107,6 +107,36 @@ async function startJackpotGame(io) {
   }, 7000);
 }
 
+// Middleware to track wagers
+app.use(async (req, res, next) => {
+  if (req.userId && req.body.amount) {
+    try {
+      await User.findByIdAndUpdate(req.userId, {
+        $inc: { totalWagered: Math.abs(req.body.amount) },
+        lastWagerTime: new Date()
+      });
+      
+      // Check if user has a referrer and meets wagering requirements
+      const user = await User.findById(req.userId);
+      if (user.referredBy && user.totalWagered >= 10000) { // Example: 10,000 wagered
+        await User.findByIdAndUpdate(user.referredBy, {
+          $inc: { referralEarnings: 100 } // Example: $100 bonus
+        });
+        
+        // Notify referrer in real-time if connected
+        io.to(`user-${user.referredBy}`).emit('referral_bonus', {
+          amount: 100,
+          referredUser: user.username,
+          totalEarnings: user.referralEarnings + 100
+        });
+      }
+    } catch (err) {
+      console.error('Wager tracking error:', err);
+    }
+  }
+  next();
+});
+
 io.on('connection', (socket) => {
   console.log('🔌 A user connected');
 
@@ -384,6 +414,30 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Referral system socket events
+  socket.on('get_referral_info', async ({ userId }) => {
+    try {
+      const user = await User.findById(userId);
+      if (!user) {
+        socket.emit('referral_error', 'User not found');
+        return;
+      }
+
+      const referralCount = await User.countDocuments({ referredBy: user._id });
+      
+      socket.emit('referral_info', {
+        code: user.referralCode,
+        link: user.getReferralLink(),
+        referrals: referralCount,
+        earnings: user.referralEarnings,
+        wagered: user.totalWagered
+      });
+    } catch (err) {
+      console.error('Referral info error:', err);
+      socket.emit('referral_error', 'Server error');
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('❌ A user disconnected');
 
@@ -462,9 +516,9 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
   }
 });
 
-// Signup
+// Signup with referral support
 app.post('/api/auth/signup', async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password, referralCode } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
   try {
@@ -473,9 +527,33 @@ app.post('/api/auth/signup', async (req, res) => {
 
     user = new User({ username });
     await user.setPassword(password);
+
+    // Process referral if provided
+    if (referralCode) {
+      const referrer = await User.findOne({ referralCode });
+      if (referrer) {
+        user.referredBy = referrer._id;
+        // Give signup bonus (example)
+        user.balance += 50;
+        user.signupBonusReceived = true;
+        
+        // Notify referrer in real-time if connected
+        io.to(`user-${referrer._id}`).emit('new_referral', {
+          username: user.username,
+          referralCount: await User.countDocuments({ referredBy: referrer._id }) + 1
+        });
+      }
+    }
+
     await user.save();
 
-    res.json({ message: 'User created' });
+    const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ 
+      token, 
+      balance: user.balance, 
+      username: user.username,
+      referredBy: user.referredBy ? true : false
+    });
   } catch (err) {
     console.error('Error creating user:', err);
     res.status(500).json({ error: 'Server error' });
@@ -495,21 +573,83 @@ app.post('/api/auth/login', async (req, res) => {
     if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
 
     const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, balance: user.balance, username: user.username });
+    res.json({ 
+      token, 
+      balance: user.balance, 
+      username: user.username,
+      referredBy: user.referredBy ? true : false
+    });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Get current user info
+// Get current user info (now includes referral info)
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-passwordHash -__v');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    const referralCount = await User.countDocuments({ referredBy: user._id });
+    
     res.json({
       username: user.username,
       balance: user.balance,
+      referralCode: user.referralCode,
+      referralLink: user.getReferralLink(),
+      referralCount,
+      referralEarnings: user.referralEarnings,
+      totalWagered: user.totalWagered,
+      referredBy: user.referredBy
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get referral leaderboard
+app.get('/api/referral/leaderboard', async (req, res) => {
+  try {
+    const topReferrers = await User.aggregate([
+      {
+        $match: { referralEarnings: { $gt: 0 } }
+      },
+      {
+        $project: {
+          username: 1,
+          referralEarnings: 1,
+          referralCount: { $size: "$referrals" }
+        }
+      },
+      {
+        $sort: { referralEarnings: -1 }
+      },
+      {
+        $limit: 10
+      }
+    ]);
+
+    res.json(topReferrers);
+  } catch (err) {
+    console.error('Referral leaderboard error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get referral info
+app.get('/api/user/referral', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const referralCount = await User.countDocuments({ referredBy: user._id });
+    
+    res.json({
+      code: user.referralCode,
+      link: user.getReferralLink(),
+      referrals: referralCount,
+      earnings: user.referralEarnings,
+      wagered: user.totalWagered
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
