@@ -1,5 +1,6 @@
 require('dotenv').config();
 const User = require('./models/user');
+const Wager = require('./models/wager'); // New import for wager model
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -11,6 +12,12 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 const upgraderRouter = require('./routes/upgrader');
+const referralRouter = require('./routes/referral'); // New import for referral routes
+const wagerRouter = require('./routes/wager').router; // New import for wager routes
+const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
+
+// Set referral reward percentage
+const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
 
 const app = express();
 const server = http.createServer(app);
@@ -26,7 +33,7 @@ const io = new Server(server, {
 
 // Jackpot game state outside connection handler
 const jackpotGame = {
-  players: [],  // { id, username, bet, socketId }
+  players: [],  // { id, username, bet, socketId, wagerId }
   isRunning: false,
   totalPot: 0,
 };
@@ -89,8 +96,32 @@ async function startJackpotGame(io) {
     try {
       const user = await User.findById(winner.id);
       if (user) {
+        // Calculate profit (total pot minus the winner's original bet)
+        const profit = jackpotGame.totalPot - winner.bet;
+        
+        // Update winner's balance
         user.balance += jackpotGame.totalPot;
+        
+        // Record game outcome for winner
+        await user.recordGameOutcome(true, profit);
         await user.save();
+        
+        // Update wager outcome for winner
+        await updateWagerOutcome(winner.wagerId, 'win', profit);
+      }
+      
+      // Update losers' wagers
+      for (const player of jackpotGame.players) {
+        if (player.id !== winner.id) {
+          const loser = await User.findById(player.id);
+          if (loser) {
+            // Record game outcome for loser
+            await loser.recordGameOutcome(false, player.bet);
+          }
+          
+          // Update wager outcome for loser
+          await updateWagerOutcome(player.wagerId, 'loss', -player.bet);
+        }
       }
     } catch (err) {
       console.error('Error updating jackpot winner balance:', err);
@@ -107,38 +138,16 @@ async function startJackpotGame(io) {
   }, 7000);
 }
 
-// Middleware to track wagers
-app.use(async (req, res, next) => {
-  if (req.userId && req.body.amount) {
-    try {
-      await User.findByIdAndUpdate(req.userId, {
-        $inc: { totalWagered: Math.abs(req.body.amount) },
-        lastWagerTime: new Date()
-      });
-      
-      // Check if user has a referrer and meets wagering requirements
-      const user = await User.findById(req.userId);
-      if (user.referredBy && user.totalWagered >= 10000) { // Example: 10,000 wagered
-        await User.findByIdAndUpdate(user.referredBy, {
-          $inc: { referralEarnings: 100 } // Example: $100 bonus
-        });
-        
-        // Notify referrer in real-time if connected
-        io.to(`user-${user.referredBy}`).emit('referral_bonus', {
-          amount: 100,
-          referredUser: user.username,
-          totalEarnings: user.referralEarnings + 100
-        });
-      }
-    } catch (err) {
-      console.error('Wager tracking error:', err);
-    }
-  }
-  next();
-});
-
 io.on('connection', (socket) => {
   console.log('🔌 A user connected');
+
+  // Join user to their own room for targeted events
+  socket.on('authenticate', ({ userId }) => {
+    if (userId) {
+      socket.join(`user-${userId}`);
+      console.log(`User ${userId} authenticated and joined their room`);
+    }
+  });
 
   socket.on('chatMessage', (message) => {
     io.emit('chatMessage', message);
@@ -171,10 +180,24 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // Record the wager
+      const wager = await recordWager(userId, 'jackpot', bet);
+      
+      // Track wager in user stats
+      await user.trackWager(bet, 'jackpot');
+      
+      // Deduct balance
       user.balance -= bet;
       await user.save();
 
-      jackpotGame.players.push({ id: userId, username, bet, socketId: socket.id });
+      jackpotGame.players.push({ 
+        id: userId, 
+        username, 
+        bet, 
+        socketId: socket.id,
+        wagerId: wager._id
+      });
+      
       jackpotGame.totalPot += bet;
 
       io.emit('jackpot_update', {
@@ -210,6 +233,13 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // Record the wager
+      const wager = await recordWager(userId, 'mines', betAmount);
+      
+      // Track wager in user stats
+      await user.trackWager(betAmount, 'mines');
+      
+      // Deduct balance
       user.balance -= betAmount;
       await user.save();
 
@@ -224,7 +254,8 @@ io.on('connection', (socket) => {
         minesPositions,
         revealedPositions: [],
         status: 'ongoing',
-        cashoutMultiplier: 1
+        cashoutMultiplier: 1,
+        wagerId: wager._id
       };
 
       minesGames.set(userId, game);
@@ -255,6 +286,17 @@ io.on('connection', (socket) => {
 
       if (game.minesPositions.includes(position)) {
         game.status = 'busted';
+        
+        // Get the user
+        const user = await User.findById(userId);
+        if (user) {
+          // Record game outcome
+          await user.recordGameOutcome(false, game.betAmount);
+        }
+        
+        // Update wager outcome
+        await updateWagerOutcome(game.wagerId, 'loss', -game.betAmount);
+        
         minesGames.delete(userId);
         
         socket.emit('mines_busted', {
@@ -298,8 +340,17 @@ io.on('connection', (socket) => {
       }
 
       const winnings = game.betAmount * game.cashoutMultiplier;
+      const profit = winnings - game.betAmount;
+      
+      // Update user balance
       user.balance += winnings;
+      
+      // Record game outcome
+      await user.recordGameOutcome(true, profit);
       await user.save();
+      
+      // Update wager outcome
+      await updateWagerOutcome(game.wagerId, 'win', profit);
 
       minesGames.delete(userId);
 
@@ -335,6 +386,12 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // Record the wager
+      const wager = await recordWager(userId, 'limbo', betAmount);
+      
+      // Track wager in user stats
+      await user.trackWager(betAmount, 'limbo');
+      
       // Deduct balance immediately
       user.balance -= betAmount;
       await user.save();
@@ -347,7 +404,8 @@ io.on('connection', (socket) => {
         winChance: calculateLimboWinChance(targetMultiplier),
         serverSeed: crypto.randomBytes(16).toString('hex'),
         clientSeed: crypto.randomBytes(16).toString('hex'),
-        nonce: 0
+        nonce: 0,
+        wagerId: wager._id
       };
 
       limboGames.set(userId, game);
@@ -382,6 +440,13 @@ io.on('connection', (socket) => {
       const result = generateLimboResult();
       const win = result >= game.targetMultiplier;
       const payout = win ? game.betAmount * game.targetMultiplier : 0;
+      const profit = win ? payout - game.betAmount : -game.betAmount;
+
+      // Update wager outcome
+      await updateWagerOutcome(game.wagerId, win ? 'win' : 'loss', profit);
+      
+      // Record game outcome
+      await user.recordGameOutcome(win, Math.abs(profit));
 
       // Update user balance if they won
       if (win) {
@@ -414,30 +479,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Referral system socket events
-  socket.on('get_referral_info', async ({ userId }) => {
-    try {
-      const user = await User.findById(userId);
-      if (!user) {
-        socket.emit('referral_error', 'User not found');
-        return;
-      }
-
-      const referralCount = await User.countDocuments({ referredBy: user._id });
-      
-      socket.emit('referral_info', {
-        code: user.referralCode,
-        link: user.getReferralLink(),
-        referrals: referralCount,
-        earnings: user.referralEarnings,
-        wagered: user.totalWagered
-      });
-    } catch (err) {
-      console.error('Referral info error:', err);
-      socket.emit('referral_error', 'Server error');
-    }
-  });
-
   socket.on('disconnect', () => {
     console.log('❌ A user disconnected');
 
@@ -453,6 +494,12 @@ io.on('connection', (socket) => {
             return user.save();
           }
         }).catch(console.error);
+
+        // Also remove the wager record
+        const wagerId = removed.wagerId;
+        if (wagerId) {
+          Wager.findByIdAndDelete(wagerId).catch(console.error);
+        }
 
         io.emit('jackpot_update', {
           players: jackpotGame.players.map(p => ({ id: p.id, username: p.username, bet: p.bet })),
@@ -510,13 +557,19 @@ function authMiddleware(req, res, next) {
 // Transaction history endpoint
 app.get('/api/user/transactions', authMiddleware, async (req, res) => {
   try {
-    res.json([]);
+    // Get user's wager history from Wager model
+    const wagers = await Wager.find({ userId: req.userId })
+      .sort({ createdAt: -1 })
+      .limit(50);
+      
+    res.json(wagers);
   } catch (err) {
+    console.error('Error fetching transactions:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Signup with referral support
+// Signup
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password, referralCode } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -527,33 +580,24 @@ app.post('/api/auth/signup', async (req, res) => {
 
     user = new User({ username });
     await user.setPassword(password);
-
-    // Process referral if provided
+    
+    // Apply referral code if provided
     if (referralCode) {
+      // Find referrer by code
       const referrer = await User.findOne({ referralCode });
       if (referrer) {
+        // Set referrer
         user.referredBy = referrer._id;
-        // Give signup bonus (example)
-        user.balance += 50;
-        user.signupBonusReceived = true;
         
-        // Notify referrer in real-time if connected
-        io.to(`user-${referrer._id}`).emit('new_referral', {
-          username: user.username,
-          referralCount: await User.countDocuments({ referredBy: referrer._id }) + 1
-        });
+        // Increment referrer's count
+        referrer.referralCount += 1;
+        await referrer.save();
       }
     }
-
+    
     await user.save();
 
-    const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ 
-      token, 
-      balance: user.balance, 
-      username: user.username,
-      referredBy: user.referredBy ? true : false
-    });
+    res.json({ message: 'User created' });
   } catch (err) {
     console.error('Error creating user:', err);
     res.status(500).json({ error: 'Server error' });
@@ -571,85 +615,43 @@ app.post('/api/auth/login', async (req, res) => {
 
     const valid = await user.validatePassword(password);
     if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
+    
+    // Update last login time
+    user.lastLoginTime = new Date();
+    await user.save();
 
     const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ 
       token, 
       balance: user.balance, 
       username: user.username,
-      referredBy: user.referredBy ? true : false
+      referralCode: user.referralCode,
+      totalWagered: user.totalWagered
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Get current user info (now includes referral info)
+// Get current user info
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-passwordHash -__v');
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const referralCount = await User.countDocuments({ referredBy: user._id });
-    
     res.json({
       username: user.username,
       balance: user.balance,
       referralCode: user.referralCode,
-      referralLink: user.getReferralLink(),
-      referralCount,
-      referralEarnings: user.referralEarnings,
       totalWagered: user.totalWagered,
-      referredBy: user.referredBy
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get referral leaderboard
-app.get('/api/referral/leaderboard', async (req, res) => {
-  try {
-    const topReferrers = await User.aggregate([
-      {
-        $match: { referralEarnings: { $gt: 0 } }
-      },
-      {
-        $project: {
-          username: 1,
-          referralEarnings: 1,
-          referralCount: { $size: "$referrals" }
-        }
-      },
-      {
-        $sort: { referralEarnings: -1 }
-      },
-      {
-        $limit: 10
-      }
-    ]);
-
-    res.json(topReferrers);
-  } catch (err) {
-    console.error('Referral leaderboard error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get referral info
-app.get('/api/user/referral', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    const referralCount = await User.countDocuments({ referredBy: user._id });
-    
-    res.json({
-      code: user.referralCode,
-      link: user.getReferralLink(),
-      referrals: referralCount,
-      earnings: user.referralEarnings,
-      wagered: user.totalWagered
+      referralEarnings: user.referralEarnings,
+      referralCount: user.referralCount,
+      gamesPlayed: user.gamesPlayed,
+      gamesWon: user.gamesWon,
+      gamesLost: user.gamesLost,
+      totalProfit: user.totalProfit,
+      highestWin: user.highestWin,
+      createdAt: user.createdAt
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -854,7 +856,7 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
     await sender.save();
     await recipient.save();
 
-    res.json({ message: `Successfully tipped ${amount} to ${recipientUsername}` });
+    res.json({ message: `Successfully tipped $${amount} to ${recipientUsername}` });
   } catch (err) {
     console.error('Tip error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -873,19 +875,33 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
 
+    // Record the wager
+    const wager = await recordWager(req.userId, 'coinflip', amount);
+    
+    // Track wager in user stats
+    await user.trackWager(amount, 'coinflip');
+
     const serverSeed = crypto.randomBytes(16).toString('hex');
     const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
     
     const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 46 ? 'heads' : 'tails';
     const win = outcome === choice;
-
+    
+    let profit = 0;
     if (win) {
+      profit = amount;
       user.balance += amount;
     } else {
+      profit = -amount;
       user.balance -= amount;
     }
 
+    // Record game outcome
+    await user.recordGameOutcome(win, Math.abs(profit));
     await user.save();
+    
+    // Update wager outcome
+    await updateWagerOutcome(wager._id, win ? 'win' : 'loss', profit);
 
     res.json({
       outcome,
@@ -899,6 +915,68 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// User stats endpoint
+app.get('/api/user/stats', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    // Get user's wagering stats
+    const wagerStats = await Wager.aggregate([
+      { $match: { userId: mongoose.Types.ObjectId(req.userId) } },
+      { $group: {
+          _id: "$gameType",
+          totalWagered: { $sum: "$amount" },
+          totalGames: { $sum: 1 },
+          wins: { $sum: { $cond: [{ $eq: ["$outcome", "win"] }, 1, 0] } },
+          losses: { $sum: { $cond: [{ $eq: ["$outcome", "loss"] }, 1, 0] } }
+        }
+      }
+    ]);
+    
+    // Get referral stats
+    const referralStats = await user.getReferralStats();
+    
+    // Calculate win rate
+    const winRate = user.gamesPlayed > 0 ? (user.gamesWon / user.gamesPlayed) * 100 : 0;
+    
+    res.json({
+      username: user.username,
+      balance: user.balance,
+      referralCode: user.referralCode,
+      referralLink: user.getReferralLink(),
+      totalWagered: user.totalWagered,
+      referralEarnings: user.referralEarnings,
+      gamesPlayed: user.gamesPlayed,
+      gamesWon: user.gamesWon,
+      gamesLost: user.gamesLost,
+      winRate: winRate.toFixed(2),
+      totalProfit: user.totalProfit,
+      highestWin: user.highestWin,
+      referralStats,
+      gameStats: wagerStats.reduce((acc, game) => {
+        acc[game._id] = {
+          totalWagered: game.totalWagered,
+          totalGames: game.totalGames,
+          wins: game.wins,
+          losses: game.losses,
+          winRate: game.totalGames > 0 ? (game.wins / game.totalGames * 100).toFixed(2) : '0.00'
+        };
+        return acc;
+      }, {})
+    });
+  } catch (err) {
+    console.error('Error getting user stats:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Referral routes
+app.use('/api/referral', referralRouter);
+
+// Wager routes
+app.use('/api/wager', wagerRouter);
 
 // Mount upgrader router
 app.use('/api/upgrader', upgraderRouter);
