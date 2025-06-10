@@ -19,6 +19,16 @@ const UserSchema = new mongoose.Schema({
     type: Number, 
     default: 0 
   },
+  // Crypto deposit addresses
+  cryptoAddresses: {
+    bitcoin: { type: String, default: null },
+    ethereum: { type: String, default: null }
+  },
+  // Store webhook IDs for each address (to manage/delete later if needed)
+  webhooks: {
+    bitcoin: { type: String, default: null },
+    ethereum: { type: String, default: null }
+  },
   // Referral System Fields
   referralCode: { 
     type: String, 
@@ -147,6 +157,18 @@ UserSchema.methods.recordGameOutcome = async function(win, profit) {
   return this.save();
 };
 
+// Set Bitcoin address for user
+UserSchema.methods.setBitcoinAddress = function(address) {
+  this.cryptoAddresses.bitcoin = address;
+  return this.save();
+};
+
+// Set Ethereum address for user
+UserSchema.methods.setEthereumAddress = function(address) {
+  this.cryptoAddresses.ethereum = address;
+  return this.save();
+};
+
 // Get statistics about referrals
 UserSchema.methods.getReferralStats = async function() {
   // Get users referred by this user
@@ -209,5 +231,7 @@ UserSchema.index({ totalWagered: -1 });
 UserSchema.index({ referralEarnings: -1 });
 UserSchema.index({ referralCount: -1 });
 UserSchema.index({ gamesPlayed: -1 });
+UserSchema.index({ 'cryptoAddresses.bitcoin': 1 });
+UserSchema.index({ 'cryptoAddresses.ethereum': 1 });
 
 module.exports = mongoose.models.User || mongoose.model('User', UserSchema);
