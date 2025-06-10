@@ -1,13 +1,21 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/updated-user');
+const User = require('../models/user'); // Changed from updated-user to match server.js
 const { 
   generateBitcoinAddress, 
   generateEthereumAddress,
   getBitcoinAddressBalance,
   getEthereumAddressBalance,
-  createAddressWebhook
+  createAddressWebhook,
+  // For development/testing when hitting rate limits
+  generateMockBitcoinAddress,
+  generateMockEthereumAddress
 } = require('../services/crypto-service');
+
+// Use this to switch to mock mode when hitting rate limits
+const USE_MOCK_MODE = process.env.NODE_ENV === 'development';
+
+const jwt = require('jsonwebtoken');
 
 // Auth middleware - same as in server.js
 function authMiddleware(req, res, next) {
@@ -21,7 +29,8 @@ function authMiddleware(req, res, next) {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret_key');
     req.userId = decoded.userId;
     next();
-  } catch {
+  } catch (error) {
+    console.error('JWT verification error:', error.message);
     res.status(401).json({ error: 'Invalid token' });
   }
 }
@@ -35,21 +44,27 @@ router.post('/generate-btc-address', authMiddleware, async (req, res) => {
     }
 
     // Check if user already has a Bitcoin address
-    if (user.cryptoAddresses.bitcoin) {
+    if (user.cryptoAddresses && user.cryptoAddresses.bitcoin) {
       return res.json({ 
         address: user.cryptoAddresses.bitcoin,
         message: 'You already have a Bitcoin address'
       });
     }
 
-    // Generate a new Bitcoin address
-    const addressData = await generateBitcoinAddress();
+    // Generate a new Bitcoin address - use mock in development if enabled
+    const addressData = USE_MOCK_MODE ? 
+      generateMockBitcoinAddress() : 
+      await generateBitcoinAddress();
     
     // Store only the public address in database (NEVER store private keys in DB)
-    await user.setBitcoinAddress(addressData.address);
+    if (!user.cryptoAddresses) {
+      user.cryptoAddresses = {};
+    }
+    user.cryptoAddresses.bitcoin = addressData.address;
+    await user.save();
     
     // Create a webhook for this address if a webhook URL is configured
-    if (process.env.WEBHOOK_CALLBACK_URL) {
+    if (process.env.WEBHOOK_CALLBACK_URL && !USE_MOCK_MODE) {
       try {
         const webhook = await createAddressWebhook(
           addressData.address,
@@ -58,6 +73,9 @@ router.post('/generate-btc-address', authMiddleware, async (req, res) => {
         );
         
         // Store the webhook ID for future reference
+        if (!user.webhooks) {
+          user.webhooks = {};
+        }
         user.webhooks.bitcoin = webhook.id;
         await user.save();
       } catch (webhookError) {
@@ -72,7 +90,15 @@ router.post('/generate-btc-address', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error('Error generating Bitcoin address:', error);
-    res.status(500).json({ error: 'Server error' });
+    
+    // Handle rate limit errors specially
+    if (error.message && error.message.includes('rate limit')) {
+      return res.status(429).json({ 
+        error: 'API rate limit exceeded. Please try again in a few minutes.' 
+      });
+    }
+    
+    res.status(500).json({ error: error.message || 'Server error' });
   }
 });
 
@@ -85,21 +111,27 @@ router.post('/generate-eth-address', authMiddleware, async (req, res) => {
     }
 
     // Check if user already has an Ethereum address
-    if (user.cryptoAddresses.ethereum) {
+    if (user.cryptoAddresses && user.cryptoAddresses.ethereum) {
       return res.json({ 
         address: user.cryptoAddresses.ethereum,
         message: 'You already have an Ethereum address'
       });
     }
 
-    // Generate a new Ethereum address
-    const addressData = await generateEthereumAddress();
+    // Generate a new Ethereum address - use mock in development if enabled
+    const addressData = USE_MOCK_MODE ? 
+      generateMockEthereumAddress() : 
+      await generateEthereumAddress();
     
     // Store only the public address in database
-    await user.setEthereumAddress(addressData.address);
+    if (!user.cryptoAddresses) {
+      user.cryptoAddresses = {};
+    }
+    user.cryptoAddresses.ethereum = addressData.address;
+    await user.save();
     
     // Create a webhook for this address if a webhook URL is configured
-    if (process.env.WEBHOOK_CALLBACK_URL) {
+    if (process.env.WEBHOOK_CALLBACK_URL && !USE_MOCK_MODE) {
       try {
         const webhook = await createAddressWebhook(
           addressData.address,
@@ -108,6 +140,9 @@ router.post('/generate-eth-address', authMiddleware, async (req, res) => {
         );
         
         // Store the webhook ID for future reference
+        if (!user.webhooks) {
+          user.webhooks = {};
+        }
         user.webhooks.ethereum = webhook.id;
         await user.save();
       } catch (webhookError) {
@@ -122,7 +157,15 @@ router.post('/generate-eth-address', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error('Error generating Ethereum address:', error);
-    res.status(500).json({ error: 'Server error' });
+    
+    // Handle rate limit errors specially
+    if (error.message && error.message.includes('rate limit')) {
+      return res.status(429).json({ 
+        error: 'API rate limit exceeded. Please try again in a few minutes.' 
+      });
+    }
+    
+    res.status(500).json({ error: error.message || 'Server error' });
   }
 });
 
@@ -134,9 +177,12 @@ router.get('/addresses', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Ensure the cryptoAddresses object exists
+    const addresses = user.cryptoAddresses || { bitcoin: null, ethereum: null };
+
     res.json({
-      bitcoin: user.cryptoAddresses.bitcoin,
-      ethereum: user.cryptoAddresses.ethereum
+      bitcoin: addresses.bitcoin,
+      ethereum: addresses.ethereum
     });
   } catch (error) {
     console.error('Error fetching addresses:', error);
@@ -156,22 +202,29 @@ router.get('/check-balances', authMiddleware, async (req, res) => {
     let ethBalance = 0;
 
     // Check BTC balance if address exists
-    if (user.cryptoAddresses.bitcoin) {
+    if (user.cryptoAddresses && user.cryptoAddresses.bitcoin) {
       btcBalance = await getBitcoinAddressBalance(user.cryptoAddresses.bitcoin);
     }
 
     // Check ETH balance if address exists
-    if (user.cryptoAddresses.ethereum) {
+    if (user.cryptoAddresses && user.cryptoAddresses.ethereum) {
       ethBalance = await getEthereumAddressBalance(user.cryptoAddresses.ethereum);
+    }
+
+    // Return mock data in development mode if enabled
+    if (USE_MOCK_MODE) {
+      // Generate some random small values for testing
+      btcBalance = Math.random() * 0.01;
+      ethBalance = Math.random() * 0.1;
     }
 
     res.json({
       bitcoin: {
-        address: user.cryptoAddresses.bitcoin,
+        address: user.cryptoAddresses?.bitcoin || null,
         balance: btcBalance
       },
       ethereum: {
-        address: user.cryptoAddresses.ethereum,
+        address: user.cryptoAddresses?.ethereum || null,
         balance: ethBalance
       }
     });
