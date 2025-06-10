@@ -9,7 +9,9 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const axios = require('axios');
 const http = require('http');
+const cryptoRoutes = require('./routes/crypto-routes');
 const { Server } = require('socket.io');
+
 
 const upgraderRouter = require('./routes/upgrader');
 const referralRouter = require('./routes/referral'); // New import for referral routes
