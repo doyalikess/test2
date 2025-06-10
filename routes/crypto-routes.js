@@ -4,7 +4,7 @@ const User = require('../models/user'); // Changed from updated-user to match se
 const crypto = require('crypto');
 
 // Use this to switch to mock mode when hitting rate limits
-const USE_MOCK_MODE = true; // Hardcode to true for now
+const USE_MOCK_MODE = false; // Hardcode to true for now
 
 const jwt = require('jsonwebtoken');
 
