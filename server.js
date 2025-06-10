@@ -14,7 +14,7 @@ const { Server } = require('socket.io');
 const upgraderRouter = require('./routes/upgrader');
 const referralRouter = require('./routes/referral'); // New import for referral routes
 const wagerRouter = require('./routes/wager').router; // New import for wager routes
-const cryptoRoutes = require('./routes/crypto-routes'); // New import for crypto routes
+const cryptoRoutes = require('./routes/crypto-routes-real');
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
 const { monitorAllAddresses } = require('./services/address-monitor'); // Import address monitoring
 
