@@ -14,12 +14,12 @@ const { Server } = require('socket.io');
 const upgraderRouter = require('./routes/upgrader');
 const referralRouter = require('./routes/referral'); // New import for referral routes
 const wagerRouter = require('./routes/wager').router; // New import for wager routes
-const cryptoRoutes = require('./routes/crypto-routes-real');
+const cryptoRoutes = require('./routes/crypto-routes');
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
 const { monitorAllAddresses } = require('./services/address-monitor'); // Import address monitoring
 
 // Set referral reward percentage
-const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
+const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
 const app = express();
 const server = http.createServer(app);
