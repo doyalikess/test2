@@ -1,19 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const User = require('../models/user'); // Changed from updated-user to match server.js
-const { 
-  generateBitcoinAddress, 
-  generateEthereumAddress,
-  getBitcoinAddressBalance,
-  getEthereumAddressBalance,
-  createAddressWebhook,
-  // For development/testing when hitting rate limits
-  generateMockBitcoinAddress,
-  generateMockEthereumAddress
-} = require('../services/crypto-service');
+const crypto = require('crypto');
 
 // Use this to switch to mock mode when hitting rate limits
-const USE_MOCK_MODE = process.env.NODE_ENV === 'development';
+const USE_MOCK_MODE = true; // Hardcode to true for now
 
 const jwt = require('jsonwebtoken');
 
@@ -35,6 +26,23 @@ function authMiddleware(req, res, next) {
   }
 }
 
+// Define mock functions here
+function generateMockBitcoinAddress() {
+  return {
+    address: `1Mock${Math.random().toString(36).substring(2, 10)}BitcoinAddress`,
+    privateKey: 'mock_private_key_do_not_use',
+    publicKey: 'mock_public_key'
+  };
+}
+
+function generateMockEthereumAddress() {
+  return {
+    address: `0x${Math.random().toString(36).substring(2, 10)}MockEthereumAddress`,
+    privateKey: 'mock_private_key_do_not_use',
+    publicKey: 'mock_public_key'
+  };
+}
+
 // Generate a new Bitcoin address for the authenticated user
 router.post('/generate-btc-address', authMiddleware, async (req, res) => {
   try {
@@ -51,10 +59,8 @@ router.post('/generate-btc-address', authMiddleware, async (req, res) => {
       });
     }
 
-    // Generate a new Bitcoin address - use mock in development if enabled
-    const addressData = USE_MOCK_MODE ? 
-      generateMockBitcoinAddress() : 
-      await generateBitcoinAddress();
+    // Generate a mock Bitcoin address
+    const addressData = generateMockBitcoinAddress();
     
     // Store only the public address in database (NEVER store private keys in DB)
     if (!user.cryptoAddresses) {
@@ -62,27 +68,6 @@ router.post('/generate-btc-address', authMiddleware, async (req, res) => {
     }
     user.cryptoAddresses.bitcoin = addressData.address;
     await user.save();
-    
-    // Create a webhook for this address if a webhook URL is configured
-    if (process.env.WEBHOOK_CALLBACK_URL && !USE_MOCK_MODE) {
-      try {
-        const webhook = await createAddressWebhook(
-          addressData.address,
-          `${process.env.WEBHOOK_CALLBACK_URL}/api/crypto/btc-webhook`,
-          'btc'
-        );
-        
-        // Store the webhook ID for future reference
-        if (!user.webhooks) {
-          user.webhooks = {};
-        }
-        user.webhooks.bitcoin = webhook.id;
-        await user.save();
-      } catch (webhookError) {
-        console.error('Webhook creation error:', webhookError);
-        // Continue even if webhook creation fails
-      }
-    }
 
     res.json({ 
       address: addressData.address,
@@ -90,14 +75,6 @@ router.post('/generate-btc-address', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error('Error generating Bitcoin address:', error);
-    
-    // Handle rate limit errors specially
-    if (error.message && error.message.includes('rate limit')) {
-      return res.status(429).json({ 
-        error: 'API rate limit exceeded. Please try again in a few minutes.' 
-      });
-    }
-    
     res.status(500).json({ error: error.message || 'Server error' });
   }
 });
@@ -118,10 +95,8 @@ router.post('/generate-eth-address', authMiddleware, async (req, res) => {
       });
     }
 
-    // Generate a new Ethereum address - use mock in development if enabled
-    const addressData = USE_MOCK_MODE ? 
-      generateMockEthereumAddress() : 
-      await generateEthereumAddress();
+    // Generate a mock Ethereum address
+    const addressData = generateMockEthereumAddress();
     
     // Store only the public address in database
     if (!user.cryptoAddresses) {
@@ -129,27 +104,6 @@ router.post('/generate-eth-address', authMiddleware, async (req, res) => {
     }
     user.cryptoAddresses.ethereum = addressData.address;
     await user.save();
-    
-    // Create a webhook for this address if a webhook URL is configured
-    if (process.env.WEBHOOK_CALLBACK_URL && !USE_MOCK_MODE) {
-      try {
-        const webhook = await createAddressWebhook(
-          addressData.address,
-          `${process.env.WEBHOOK_CALLBACK_URL}/api/crypto/eth-webhook`,
-          'eth'
-        );
-        
-        // Store the webhook ID for future reference
-        if (!user.webhooks) {
-          user.webhooks = {};
-        }
-        user.webhooks.ethereum = webhook.id;
-        await user.save();
-      } catch (webhookError) {
-        console.error('Webhook creation error:', webhookError);
-        // Continue even if webhook creation fails
-      }
-    }
 
     res.json({ 
       address: addressData.address,
@@ -157,14 +111,6 @@ router.post('/generate-eth-address', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error('Error generating Ethereum address:', error);
-    
-    // Handle rate limit errors specially
-    if (error.message && error.message.includes('rate limit')) {
-      return res.status(429).json({ 
-        error: 'API rate limit exceeded. Please try again in a few minutes.' 
-      });
-    }
-    
     res.status(500).json({ error: error.message || 'Server error' });
   }
 });
@@ -198,25 +144,9 @@ router.get('/check-balances', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    let btcBalance = 0;
-    let ethBalance = 0;
-
-    // Check BTC balance if address exists
-    if (user.cryptoAddresses && user.cryptoAddresses.bitcoin) {
-      btcBalance = await getBitcoinAddressBalance(user.cryptoAddresses.bitcoin);
-    }
-
-    // Check ETH balance if address exists
-    if (user.cryptoAddresses && user.cryptoAddresses.ethereum) {
-      ethBalance = await getEthereumAddressBalance(user.cryptoAddresses.ethereum);
-    }
-
-    // Return mock data in development mode if enabled
-    if (USE_MOCK_MODE) {
-      // Generate some random small values for testing
-      btcBalance = Math.random() * 0.01;
-      ethBalance = Math.random() * 0.1;
-    }
+    // Generate random mock balances for testing
+    const btcBalance = Math.random() * 0.01;
+    const ethBalance = Math.random() * 0.1;
 
     res.json({
       bitcoin: {
