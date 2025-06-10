@@ -43,6 +43,47 @@ function generateMockEthereumAddress() {
   };
 }
 
+// Test routes without auth for debugging
+router.post('/test-generate-btc', async (req, res) => {
+  const addressData = generateMockBitcoinAddress();
+  res.json({ 
+    address: addressData.address,
+    message: 'Bitcoin address generated successfully' 
+  });
+});
+
+router.post('/test-generate-eth', async (req, res) => {
+  const addressData = generateMockEthereumAddress();
+  res.json({ 
+    address: addressData.address,
+    message: 'Ethereum address generated successfully' 
+  });
+});
+
+router.get('/test-addresses', async (req, res) => {
+  res.json({
+    bitcoin: null,
+    ethereum: null
+  });
+});
+
+router.get('/test-balances', async (req, res) => {
+  // Generate random mock balances for testing
+  const btcBalance = Math.random() * 0.01;
+  const ethBalance = Math.random() * 0.1;
+  
+  res.json({
+    bitcoin: {
+      address: `1MockBitcoinAddress`,
+      balance: btcBalance
+    },
+    ethereum: {
+      address: `0xMockEthereumAddress`,
+      balance: ethBalance
+    }
+  });
+});
+
 // Generate a new Bitcoin address for the authenticated user
 router.post('/generate-btc-address', authMiddleware, async (req, res) => {
   try {
