@@ -1077,7 +1077,7 @@ app.post('/api/auth/signup', async (req, res) => {
     user.referralCode = crypto.randomBytes(3).toString('hex').toUpperCase();
     
     // Welcome bonus
-    user.balance = 1; // $1 welcome bonus
+    user.balance = 10; // $10 welcome bonus
     
     // Record IP address for security
     user.registrationIP = ip;
@@ -1086,7 +1086,7 @@ app.post('/api/auth/signup', async (req, res) => {
     await user.save();
 
     logger.info(`New user registered: ${username}`);
-    res.json({ message: 'User created with $1 welcome bonus' });
+    res.json({ message: 'User created with $10 welcome bonus' });
   } catch (err) {
     logger.error('Error creating user:', err);
     res.status(500).json({ error: 'Server error' });
