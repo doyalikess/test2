@@ -1077,7 +1077,7 @@ app.post('/api/auth/signup', async (req, res) => {
     user.referralCode = crypto.randomBytes(3).toString('hex').toUpperCase();
     
     // Welcome bonus
-    user.balance = 10; // $10 welcome bonus
+    user.balance = 1; // $1 welcome bonus
     
     // Record IP address for security
     user.registrationIP = ip;
@@ -1086,7 +1086,7 @@ app.post('/api/auth/signup', async (req, res) => {
     await user.save();
 
     logger.info(`New user registered: ${username}`);
-    res.json({ message: 'User created with $10 welcome bonus' });
+    res.json({ message: 'User created with $1 welcome bonus' });
   } catch (err) {
     logger.error('Error creating user:', err);
     res.status(500).json({ error: 'Server error' });
@@ -1270,8 +1270,8 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   if (!amount || !currency) return res.status(400).json({ error: 'Amount and currency required' });
 
   // Validate amount and currency
-  if (amount < 10) {
-    return res.status(400).json({ error: 'Minimum deposit amount is $10' });
+  if (amount < 1) {
+    return res.status(400).json({ error: 'Minimum deposit amount is $1' });
   }
 
   const allowedCurrencies = ['BTC', 'ETH', 'LTC', 'USDT'];
