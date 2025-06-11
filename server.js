@@ -206,6 +206,26 @@ function verifyTransaction(transactionId, userId, amount, type) {
   return true;
 }
 
+// Default/fallback prices for when API is unavailable
+const defaultCryptoPrices = {
+  BTC: {
+    price: 65000,
+    change24h: 1.2
+  },
+  ETH: {
+    price: 3500,
+    change24h: 0.8
+  },
+  LTC: {
+    price: 80,
+    change24h: -0.5
+  },
+  USDT: {
+    price: 1,
+    change24h: 0
+  }
+};
+
 // Fetch current cryptocurrency prices
 async function fetchCryptoPrices() {
   const now = Date.now();
@@ -225,7 +245,8 @@ async function fetchCryptoPrices() {
           ids: 'bitcoin,ethereum,litecoin,tether',
           vs_currencies: 'usd',
           include_24hr_change: true
-        }
+        },
+        timeout: 5000 // 5 second timeout
       }
     );
     
@@ -253,12 +274,31 @@ async function fetchCryptoPrices() {
     cryptoPriceCache.prices = prices;
     cryptoPriceCache.lastFetch = now;
     
+    // Extend cache duration if we hit rate limits
+    if (response.headers && response.headers['x-ratelimit-remaining'] === '0') {
+      const resetTime = parseInt(response.headers['x-ratelimit-reset'] || '0') * 1000;
+      if (resetTime > 0) {
+        const timeToReset = resetTime - Date.now();
+        if (timeToReset > 0) {
+          cryptoPriceCache.cacheDuration = Math.max(cryptoPriceCache.cacheDuration, timeToReset + 10000);
+          logger.warn(`CoinGecko rate limit hit, extending cache duration to ${cryptoPriceCache.cacheDuration / 1000} seconds`);
+        }
+      }
+    }
+    
     return prices;
   } catch (error) {
     logger.error('Error fetching crypto prices:', error);
     
-    // Return cached prices if available, or empty object
-    return cryptoPriceCache.prices || {};
+    // If we hit rate limits, extend cache duration
+    if (error.response && error.response.status === 429) {
+      const retryAfter = parseInt(error.response.headers['retry-after'] || '60');
+      cryptoPriceCache.cacheDuration = Math.max(cryptoPriceCache.cacheDuration, (retryAfter + 5) * 1000);
+      logger.warn(`CoinGecko rate limit hit (429), extending cache duration to ${cryptoPriceCache.cacheDuration / 1000} seconds`);
+    }
+    
+    // Return cached prices if available, fallback data if not
+    return cryptoPriceCache.prices || defaultCryptoPrices;
   }
 }
 
