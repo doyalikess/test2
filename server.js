@@ -17,7 +17,7 @@ const wagerRouter = require('./routes/wager').router; // New import for wager ro
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
 
 // Set referral reward percentage
-const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
+const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
 
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
@@ -1468,7 +1468,7 @@ app.post('/api/payment/webhook', async (req, res) => {
         userId,
         amount,
         gameType: 'deposit',
-        outcome: 'none',
+        outcome: 'win',
         profit: amount,
         meta: {
           paymentId,
@@ -1563,8 +1563,8 @@ app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
     const transaction = new Wager({
       userId: req.userId,
       amount,
-      gameType: 'admin_credit',
-      outcome: 'none',
+      gameType: 'deposit',
+      outcome: 'win',
       profit: amount
     });
     
@@ -1687,7 +1687,7 @@ app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
       userId: req.userId,
       amount,
       gameType: 'withdrawal',
-      outcome: 'none',
+      outcome: 'loss',
       profit: -amount,
       meta: {
         currency,
