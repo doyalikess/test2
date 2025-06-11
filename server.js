@@ -24,7 +24,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || 'H5RMGFD-DDJMKFB-QEKXXBP-6VA0PX1';
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || crypto.randomBytes(16).toString('hex');
 const CALLBACK_URL = 'https://test2-e7gb.onrender.com/api/payment/webhook';
-const FRONTEND_URL = 'https://dgenrand0.vercel.app';
+const FRONTEND_URL = 'http://localhost:3000/';
 
 // Create custom logger
 const logger = {
