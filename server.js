@@ -10,8 +10,6 @@ const crypto = require('crypto');
 const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
-const rateLimit = require('express-rate-limit'); // You may need to install this: npm install express-rate-limit
-const { createLogger, format, transports } = require('winston'); // You may need to install this: npm install winston
 
 const upgraderRouter = require('./routes/upgrader');
 const referralRouter = require('./routes/referral'); // New import for referral routes
@@ -28,44 +26,18 @@ const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || crypto.rand
 const CALLBACK_URL = 'https://test2-e7gb.onrender.com/api/payment/webhook';
 const FRONTEND_URL = 'https://dgenrand0.vercel.app';
 
-// Setup logger
-const logger = createLogger({
-  level: 'info',
-  format: format.combine(
-    format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-    format.errors({ stack: true }),
-    format.splat(),
-    format.json()
-  ),
-  defaultMeta: { service: 'crypto-casino' },
-  transports: [
-    new transports.File({ filename: 'error.log', level: 'error' }),
-    new transports.File({ filename: 'combined.log' }),
-    new transports.Console({
-      format: format.combine(
-        format.colorize(),
-        format.simple()
-      )
-    })
-  ],
-});
-
-// Rate limiters
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // limit each IP to 20 requests per windowMs
-  message: { error: 'Too many login attempts, please try again later' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 60, // limit each IP to 60 requests per minute
-  message: { error: 'Too many requests, please try again later' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+// Create custom logger
+const logger = {
+  info: (message, ...args) => {
+    console.log(`[INFO] ${message}`, ...args);
+  },
+  warn: (message, ...args) => {
+    console.warn(`[WARN] ${message}`, ...args);
+  },
+  error: (message, ...args) => {
+    console.error(`[ERROR] ${message}`, ...args);
+  }
+};
 
 const app = express();
 const server = http.createServer(app);
@@ -704,10 +676,6 @@ const rawBodySaver = (req, res, buf, encoding) => {
   }
 };
 app.use(express.json({ verify: rawBodySaver }));
-
-// Apply rate limiters
-app.use('/api/auth/', authLimiter);
-app.use('/api/', apiLimiter);
 
 // Connect to MongoDB
 mongoose
