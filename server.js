@@ -14,12 +14,10 @@ const { Server } = require('socket.io');
 const upgraderRouter = require('./routes/upgrader');
 const referralRouter = require('./routes/referral'); // New import for referral routes
 const wagerRouter = require('./routes/wager').router; // New import for wager routes
-const cryptoRoutes = require('./routes/crypto-routes');
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
-const { monitorAllAddresses } = require('./services/address-monitor'); // Import address monitoring
 
 // Set referral reward percentage
-const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
+const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
 
 const app = express();
 const server = http.createServer(app);
@@ -531,14 +529,7 @@ app.use(express.json({ verify: rawBodySaver }));
 // Connect to MongoDB
 mongoose
   .connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => {
-    console.log('✅ MongoDB connected');
-    
-    // Set up periodic monitoring for crypto deposits (every hour)
-    setInterval(() => {
-      monitorAllAddresses();
-    }, 3600000);
-  })
+  .then(() => console.log('✅ MongoDB connected'))
   .catch((err) => {
     console.error('MongoDB connection error:', err);
     process.exit(1);
@@ -660,9 +651,7 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
       gamesLost: user.gamesLost,
       totalProfit: user.totalProfit,
       highestWin: user.highestWin,
-      createdAt: user.createdAt,
-      // Include crypto addresses if they exist
-      cryptoAddresses: user.cryptoAddresses || { bitcoin: null, ethereum: null }
+      createdAt: user.createdAt
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -966,7 +955,6 @@ app.get('/api/user/stats', authMiddleware, async (req, res) => {
       totalProfit: user.totalProfit,
       highestWin: user.highestWin,
       referralStats,
-      cryptoAddresses: user.cryptoAddresses || { bitcoin: null, ethereum: null },
       gameStats: wagerStats.reduce((acc, game) => {
         acc[game._id] = {
           totalWagered: game.totalWagered,
@@ -984,11 +972,14 @@ app.get('/api/user/stats', authMiddleware, async (req, res) => {
   }
 });
 
-// Mount all routers
+// Referral routes
 app.use('/api/referral', referralRouter);
+
+// Wager routes
 app.use('/api/wager', wagerRouter);
+
+// Mount upgrader router
 app.use('/api/upgrader', upgraderRouter);
-app.use('/api/crypto', cryptoRoutes); // Mount crypto routes
 
 // Start the server
 const PORT = process.env.PORT || 4000;
