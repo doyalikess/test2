@@ -19,6 +19,10 @@ const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
 
+// NowPayments Config
+const NOWPAYMENTS_API_KEY = 'H5RMGFD-DDJMKFB-QEKXXBP-6VA0PX1'; // Your API key
+const NOWPAYMENTS_IPN_SECRET = crypto.randomBytes(16).toString('hex'); // Generate a secure secret
+
 const app = express();
 const server = http.createServer(app);
 
@@ -658,108 +662,80 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
   }
 });
 
-// Deposit endpoint with NOWPAYMENTS
+// Create a deposit invoice
 app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   const { amount, currency } = req.body;
-
-  if (!amount || !currency) {
-    return res.status(400).json({ error: 'Amount and currency are required' });
-  }
-
-  const allowedCurrencies = ['BTC', 'ETH', 'USDT', 'LTC'];
-  const upperCurrency = currency.toUpperCase();
-
-  if (!allowedCurrencies.includes(upperCurrency)) {
-    return res.status(400).json({ error: 'Unsupported currency' });
-  }
+  if (!amount || !currency) return res.status(400).json({ error: 'Amount and currency required' });
 
   try {
-    const order_id = `order_${Date.now()}_${req.userId}`;
-
     const response = await axios.post(
       'https://api.nowpayments.io/v1/invoice',
       {
         price_amount: amount,
-        price_currency: 'USD',
-        pay_currency: upperCurrency,
-        order_id: order_id,
-        order_description: 'Deposit via NOWPayments',
+        price_currency: 'usd',
+        pay_currency: currency.toLowerCase(),
+        order_id: `deposit_${req.userId}_${Date.now()}`,
+        ipn_callback_url: `${process.env.BASE_URL}/api/payment/webhook`,
       },
-      {
-        headers: {
-          'x-api-key': process.env.NOWPAYMENTS_API_KEY,
-          'Content-Type': 'application/json',
-        },
-      }
+      { headers: { 'x-api-key': NOWPAYMENTS_API_KEY } }
     );
 
-    res.status(200).json({
-      invoice_url: response.data.invoice_url,
-      invoice_id: response.data.id,
+    res.json({
+      deposit_url: response.data.invoice_url,
+      deposit_id: response.data.id,
     });
   } catch (error) {
-    console.error('NOWPAYMENTS error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to create invoice with NOWPAYMENTS' });
+    console.error('NowPayments error:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to create deposit' });
   }
 });
 
-// IMPROVED NOWPAYMENTS WEBHOOK HANDLER
-app.post('/api/nowpayments-webhook', async (req, res) => {
-  try {
-    // 1. Verify HMAC signature
-    const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
-    const incomingSig = req.headers['x-nowpayments-signature'];
-    const expectedSig = crypto
-      .createHmac('sha256', ipnSecret)
-      .update(req.rawBody)
-      .digest('hex');
+// Webhook handler (NowPayments calls this when payment is confirmed)
+app.post('/api/payment/webhook', async (req, res) => {
+  const signature = req.headers['x-nowpayments-sig'];
+  const expectedSig = crypto
+    .createHmac('sha256', NOWPAYMENTS_IPN_SECRET)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
 
-    if (incomingSig !== expectedSig) {
-      console.error('Invalid signature. Expected:', expectedSig, 'Received:', incomingSig);
-      return res.status(401).json({ error: 'Invalid signature' });
-    }
+  // Verify signature
+  if (signature !== expectedSig) {
+    console.error('⚠️ Invalid webhook signature');
+    return res.status(403).json({ error: 'Invalid signature' });
+  }
 
-    // 2. Process payload
-    const { payment_status, order_id, price_amount, invoice_id } = req.body;
-    console.log('Webhook received:', { payment_status, order_id, price_amount });
-
-    if (payment_status === 'confirmed' || payment_status === 'finished') {
-      // 3. Extract user ID safely
-      const userId = order_id.split('_').pop();
-      if (!mongoose.Types.ObjectId.isValid(userId)) {
-        console.error('Invalid user ID in order_id:', order_id);
-        return res.status(400).json({ error: 'Invalid order_id format' });
-      }
-
-      // 4. Update user balance
+  const { payment_status, order_id, price_amount } = req.body;
+  
+  if (payment_status === 'finished') {
+    try {
+      const userId = order_id.split('_')[1]; // Extract from deposit_<userId>_<timestamp>
       const user = await User.findById(userId);
+      
       if (!user) {
-        console.error('User not found for ID:', userId);
+        console.error('User not found for deposit:', order_id);
         return res.status(404).json({ error: 'User not found' });
       }
 
+      // Credit balance
       user.balance += parseFloat(price_amount);
       await user.save();
 
-      // 5. Notify frontend in real-time
+      // Notify frontend in real-time
       io.to(`user-${userId}`).emit('balance_update', {
         newBalance: user.balance,
         amount: price_amount,
-        type: 'deposit',
-        invoiceId: invoice_id
       });
 
-      console.log(`Deposit completed for ${userId}: +$${price_amount}`);
-      return res.json({ message: 'Balance updated' });
+      console.log(`💰 Deposit success: User ${userId} +$${price_amount}`);
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error('Webhook processing error:', err);
+      return res.status(500).json({ error: 'Server error' });
     }
-
-    res.status(200).json({ message: 'Webhook received (no action)' });
-  } catch (err) {
-    console.error('Webhook processing error:', err);
-    res.status(500).json({ error: 'Server error' });
   }
-});
 
+  res.status(200).json({ received: true });
+});
 // Add balance manually
 app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
   const { amount } = req.body;
