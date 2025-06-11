@@ -17,14 +17,14 @@ const wagerRouter = require('./routes/wager').router; // New import for wager ro
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
 
 // Set referral reward percentage
-const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
+const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
 
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || 'H5RMGFD-DDJMKFB-QEKXXBP-6VA0PX1';
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || crypto.randomBytes(16).toString('hex');
 const CALLBACK_URL = 'https://test2-e7gb.onrender.com/api/payment/webhook';
-const FRONTEND_URL = 'http://localhost:3000';
+const FRONTEND_URL = 'https://dgenrand0.vercel.app';
 
 // Create custom logger
 const logger = {
@@ -143,6 +143,72 @@ const limboGames = new Map(); // Stores active limbo games by userId
 
 // Transaction tracking
 const transactions = new Map(); // Stores recent transactions for duplicate prevention
+
+// Unwagered deposit tracking for wagering requirements
+let WAGER_REQUIREMENT_MULTIPLIER = 1.0; // Users must wager 1x their deposit amount (default)
+
+// User level system configuration - 100 levels, with level 50 at $1,000 wagered
+const USER_LEVELS = [];
+
+// Colors to cycle through for different level ranges
+const levelColors = [
+  "#a9b1d6", // Levels 1-10
+  "#7aa2f7", // Levels 11-20
+  "#9ece6a", // Levels 21-30
+  "#e0af68", // Levels 31-40
+  "#f7768e", // Levels 41-50
+  "#bb9af7", // Levels 51-60
+  "#2ac3de", // Levels 61-70
+  "#ff9e64", // Levels 71-80
+  "#c0caf5", // Levels 81-90
+  "#73daca"  // Levels 91-100
+];
+
+// Generate 100 levels with appropriate scaling
+for (let i = 1; i <= 100; i++) {
+  let requiredWagering;
+  
+  // Levels 1-50: Linear progression to $1,000
+  if (i <= 50) {
+    requiredWagering = Math.floor((i - 1) * (1000 / 50));
+  } 
+  // Levels 51-75: Progress to $5,000
+  else if (i <= 75) {
+    requiredWagering = 1000 + Math.floor((i - 50) * (4000 / 25));
+  }
+  // Levels 76-90: Progress to $10,000
+  else if (i <= 90) {
+    requiredWagering = 5000 + Math.floor((i - 75) * (5000 / 15));
+  }
+  // Levels 91-100: Progress to $25,000
+  else {
+    requiredWagering = 10000 + Math.floor((i - 90) * (15000 / 10));
+  }
+  
+  // Calculate max bet based on level (increases with level)
+  const maxBet = Math.min(100 * i, 10000);
+  
+  // Select color based on level range
+  const colorIndex = Math.floor((i - 1) / 10);
+  const color = levelColors[colorIndex % levelColors.length];
+  
+  // Special name for milestone levels, otherwise just the level number
+  let name;
+  if (i === 1) name = "Rookie";
+  else if (i === 25) name = "Adept";
+  else if (i === 50) name = "Master";
+  else if (i === 75) name = "Expert";
+  else if (i === 100) name = "Legend";
+  else name = `Level ${i}`;
+  
+  USER_LEVELS.push({
+    level: i,
+    name,
+    requiredWagering,
+    color,
+    rewards: { maxBet }
+  });
+}
 
 // Mines game helper functions
 function generateMinesPositions(gridSize, minesCount) {
@@ -328,6 +394,80 @@ function trackSuspiciousActivity(type, details) {
   logger.warn(`Suspicious activity detected: ${type}`, details);
 }
 
+// Helper function to update user level based on total wagering
+function updateUserLevel(user) {
+  if (!user) return;
+  
+  // Initialize level data if not present
+  if (!user.level) {
+    user.level = {
+      current: 1,
+      progress: 0,
+      totalWagered: user.totalWagered || 0
+    };
+  }
+  
+  // Update total wagered in level data
+  user.level.totalWagered = user.totalWagered || 0;
+  
+  // Find current level based on total wagering
+  let currentLevel = USER_LEVELS[0]; // Default to level 1
+  let nextLevel = USER_LEVELS[1]; // Default to level 2
+  
+  for (let i = USER_LEVELS.length - 1; i >= 0; i--) {
+    if (user.totalWagered >= USER_LEVELS[i].requiredWagering) {
+      currentLevel = USER_LEVELS[i];
+      nextLevel = USER_LEVELS[i + 1] || currentLevel;
+      break;
+    }
+  }
+  
+  // Calculate progress to next level (0-100%)
+  let progress = 0;
+  if (nextLevel && nextLevel !== currentLevel) {
+    const currentWagering = user.totalWagered - currentLevel.requiredWagering;
+    const requiredForNextLevel = nextLevel.requiredWagering - currentLevel.requiredWagering;
+    
+    // Ensure we don't divide by zero if levels are too close together
+    if (requiredForNextLevel > 0) {
+      progress = Math.min(Math.floor((currentWagering / requiredForNextLevel) * 100), 99);
+    } else {
+      progress = 99; // Almost at next level if difference is too small
+    }
+  } else {
+    // Max level reached
+    progress = 100;
+  }
+  
+  // Only emit level up event if level has increased
+  if (currentLevel.level > (user.level.current || 1)) {
+    // If user gained multiple levels at once, we still emit just one event for the highest level
+    // but we log each level gain for tracking purposes
+    for (let lvl = (user.level.current || 1) + 1; lvl <= currentLevel.level; lvl++) {
+      logger.info(`User ${user._id} leveled up to ${lvl}`);
+    }
+    
+    // Emit level up event to the user's room
+    io.to(`user-${user._id}`).emit('level_up', {
+      oldLevel: user.level.current,
+      newLevel: currentLevel.level,
+      levelName: currentLevel.name,
+      rewards: currentLevel.rewards
+    });
+    
+    logger.info(`User ${user._id} leveled up from ${user.level.current} to ${currentLevel.level}`);
+  }
+  
+  // Update user level data
+  user.level.current = currentLevel.level;
+  user.level.name = currentLevel.name;
+  user.level.color = currentLevel.color;
+  user.level.progress = progress;
+  user.level.nextLevel = nextLevel !== currentLevel ? nextLevel.level : null;
+  user.level.nextLevelName = nextLevel !== currentLevel ? nextLevel.name : null;
+  user.level.requiredWageringForNextLevel = nextLevel !== currentLevel ? nextLevel.requiredWagering : null;
+}
+
 // Check if IP is blocked
 function isIPBlocked(ip) {
   return securityEvents.blockedIPs.has(ip);
@@ -480,8 +620,61 @@ io.on('connection', (socket) => {
       // Record the wager
       const wager = await recordWager(userId, 'jackpot', bet);
       
-      // Track wager in user stats
-      await user.trackWager(bet, 'jackpot');
+      // Track wager in user stats and reduce unwagered amount
+      // Process unwagered amount for wagering requirements
+      if (user.unwageredAmount === undefined) {
+        user.unwageredAmount = 0;
+      }
+      
+      // Track wagering progress for requirements
+      if (!user.wageringProgress) {
+        user.wageringProgress = {
+          totalDeposited: user.unwageredAmount || 0,
+          totalWageredSinceDeposit: 0
+        };
+      }
+      
+      // Add this wager to total wagered
+      user.wageringProgress.totalWageredSinceDeposit += bet;
+      
+      // Check if wagering requirement is now met
+      const requiredWagering = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
+      if (user.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
+        // Requirement met - reset counters
+        user.unwageredAmount = 0;
+        user.wageringProgress = {
+          totalDeposited: 0,
+          totalWageredSinceDeposit: 0
+        };
+        logger.info(`User ${userId} completed wagering requirements! Total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, Required: $${requiredWagering}`);
+      } else {
+        // Still have requirements to meet
+        const remaining = requiredWagering - user.wageringProgress.totalWageredSinceDeposit;
+        user.unwageredAmount = remaining;
+        logger.info(`User ${userId} wagered $${bet} in jackpot, total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, still need: $${remaining.toFixed(2)}`);
+      }
+      
+      // Track wager stats
+      user.totalWagered = (user.totalWagered || 0) + bet;
+      
+      // Initialize game stats
+      if (!user.gameStats) {
+        user.gameStats = new Map();
+      }
+      
+      if (!user.gameStats.has('jackpot')) {
+        user.gameStats.set('jackpot', {
+          totalWagered: 0,
+          totalGames: 0,
+          wins: 0,
+          losses: 0
+        });
+      }
+      
+      const gameStats = user.gameStats.get('jackpot');
+      gameStats.totalWagered += bet;
+      gameStats.totalGames += 1;
+      user.gameStats.set('jackpot', gameStats);
       
       // Deduct balance
       user.balance -= bet;
@@ -539,8 +732,62 @@ io.on('connection', (socket) => {
       // Record the wager
       const wager = await recordWager(userId, 'mines', betAmount);
       
-      // Track wager in user stats
-      await user.trackWager(betAmount, 'mines');
+      // Track wager in user stats and reduce unwagered amount
+      // Process unwagered amount for wagering requirements
+      if (user.unwageredAmount === undefined) {
+        user.unwageredAmount = 0;
+      }
+      
+      // Track wagering progress for requirements
+      if (!user.wageringProgress) {
+        user.wageringProgress = {
+          totalDeposited: user.unwageredAmount || 0,
+          totalWageredSinceDeposit: 0
+        };
+      }
+      
+      // Add this wager to total wagered
+      user.wageringProgress.totalWageredSinceDeposit += betAmount;
+      
+      // Check if wagering requirement is now met
+      const requiredWagering = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
+      if (user.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
+        // Requirement met - reset counters
+        user.unwageredAmount = 0;
+        user.wageringProgress = {
+          totalDeposited: 0,
+          totalWageredSinceDeposit: 0
+        };
+        logger.info(`User ${userId} completed wagering requirements! Total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, Required: $${requiredWagering}`);
+      } else {
+        // Still have requirements to meet
+        const remaining = requiredWagering - user.wageringProgress.totalWageredSinceDeposit;
+        user.unwageredAmount = remaining;
+        logger.info(`User ${userId} wagered $${betAmount} in mines, total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, still need: $${remaining.toFixed(2)}`);
+      }
+      
+      // Track wager stats
+      user.totalWagered = (user.totalWagered || 0) + betAmount;
+      
+      // Initialize this game type in stats if it doesn't exist
+      if (!user.gameStats) {
+        user.gameStats = new Map();
+      }
+      
+      if (!user.gameStats.has('mines')) {
+        user.gameStats.set('mines', {
+          totalWagered: 0,
+          totalGames: 0,
+          wins: 0,
+          losses: 0
+        });
+      }
+      
+      // Update game stats
+      const gameStats = user.gameStats.get('mines');
+      gameStats.totalWagered += betAmount;
+      gameStats.totalGames += 1;
+      user.gameStats.set('mines', gameStats);
       
       // Deduct balance
       user.balance -= betAmount;
@@ -709,8 +956,61 @@ io.on('connection', (socket) => {
       // Record the wager
       const wager = await recordWager(userId, 'limbo', betAmount);
       
-      // Track wager in user stats
-      await user.trackWager(betAmount, 'limbo');
+      // Track wager in user stats and reduce unwagered amount
+      // Process unwagered amount for wagering requirements
+      if (user.unwageredAmount === undefined) {
+        user.unwageredAmount = 0;
+      }
+      
+      // Track wagering progress for requirements
+      if (!user.wageringProgress) {
+        user.wageringProgress = {
+          totalDeposited: user.unwageredAmount || 0,
+          totalWageredSinceDeposit: 0
+        };
+      }
+      
+      // Add this wager to total wagered
+      user.wageringProgress.totalWageredSinceDeposit += betAmount;
+      
+      // Check if wagering requirement is now met
+      const requiredWagering = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
+      if (user.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
+        // Requirement met - reset counters
+        user.unwageredAmount = 0;
+        user.wageringProgress = {
+          totalDeposited: 0,
+          totalWageredSinceDeposit: 0
+        };
+        logger.info(`User ${userId} completed wagering requirements! Total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, Required: $${requiredWagering}`);
+      } else {
+        // Still have requirements to meet
+        const remaining = requiredWagering - user.wageringProgress.totalWageredSinceDeposit;
+        user.unwageredAmount = remaining;
+        logger.info(`User ${userId} wagered $${betAmount} in limbo, total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, still need: $${remaining.toFixed(2)}`);
+      }
+      
+      // Track wager stats
+      user.totalWagered = (user.totalWagered || 0) + betAmount;
+      
+      // Initialize game stats
+      if (!user.gameStats) {
+        user.gameStats = new Map();
+      }
+      
+      if (!user.gameStats.has('limbo')) {
+        user.gameStats.set('limbo', {
+          totalWagered: 0,
+          totalGames: 0,
+          wins: 0,
+          losses: 0
+        });
+      }
+      
+      const gameStats = user.gameStats.get('limbo');
+      gameStats.totalWagered += betAmount;
+      gameStats.totalGames += 1;
+      user.gameStats.set('limbo', gameStats);
       
       // Deduct balance immediately
       user.balance -= betAmount;
@@ -1046,10 +1346,62 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
     const wagers = await Wager.find({ userId: req.userId })
       .sort({ createdAt: -1 })
       .limit(50);
-      
-    res.json(wagers);
+    
+    // Get unwagered amount and progress information
+    const user = await User.findById(req.userId);
+    const unwageredAmount = user?.unwageredAmount || 0;
+    const wageringProgress = user?.wageringProgress || { totalDeposited: 0, totalWageredSinceDeposit: 0 };
+    
+    res.json({
+      transactions: wagers,
+      wagering: {
+        unwageredAmount,
+        requirementMultiplier: WAGER_REQUIREMENT_MULTIPLIER,
+        canWithdraw: unwageredAmount <= 0,
+        progress: {
+          totalDeposited: wageringProgress.totalDeposited,
+          totalWagered: wageringProgress.totalWageredSinceDeposit,
+          required: wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER,
+          remaining: Math.max(0, (wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER) - wageringProgress.totalWageredSinceDeposit)
+        }
+      }
+    });
   } catch (err) {
     logger.error('Error fetching transactions:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get wagering status endpoint
+app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Ensure unwageredAmount is initialized
+    if (user.unwageredAmount === undefined) {
+      user.unwageredAmount = 0;
+      await user.save();
+    }
+    
+    const wageringProgress = user.wageringProgress || { totalDeposited: 0, totalWageredSinceDeposit: 0 };
+    
+    res.json({
+      unwageredAmount: user.unwageredAmount,
+      requirementMultiplier: WAGER_REQUIREMENT_MULTIPLIER,
+      canWithdraw: user.unwageredAmount <= 0,
+      totalWagered: user.totalWagered || 0,
+      progress: {
+        totalDeposited: wageringProgress.totalDeposited,
+        totalWagered: wageringProgress.totalWageredSinceDeposit,
+        required: wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER,
+        remaining: Math.max(0, (wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER) - wageringProgress.totalWageredSinceDeposit)
+      }
+    });
+  } catch (err) {
+    logger.error('Error fetching wagering status:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -1430,40 +1782,87 @@ app.post('/api/payment/webhook', async (req, res) => {
     // Log the raw webhook
     logger.info('Payment webhook received:', req.body);
     
+    // Determine if we're in production mode
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.STRICT_WEBHOOK_VALIDATION === 'true';
+    
     // Verify signature if provided
     const signature = req.headers['x-nowpayments-sig'];
     if (signature && NOWPAYMENTS_IPN_SECRET && NOWPAYMENTS_IPN_SECRET !== 'your_ipn_secret_here') {
-      let expectedSig;
+      let signatureIsValid = false;
       
       try {
-        // Calculate expected signature using raw body
-        expectedSig = crypto
-          .createHmac('sha256', NOWPAYMENTS_IPN_SECRET)
-          .update(req.rawBody || JSON.stringify(req.body))
-          .digest('hex');
+        // Try different signature calculation methods that NOWPayments might use
+        const bodyString = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
+        const sortedBodyString = JSON.stringify(req.body, Object.keys(req.body).sort());
+        const cleanBodyString = JSON.stringify(req.body);
+        
+        // Method 1: Use raw body as received
+        const sig1 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(bodyString).digest('hex');
+        
+        // Method 2: Use sorted JSON keys
+        const sig2 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(sortedBodyString).digest('hex');
+        
+        // Method 3: Use clean JSON without extra whitespace
+        const sig3 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(cleanBodyString).digest('hex');
+        
+        // Method 4: Try with base64 encoding
+        const sig4 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(bodyString).digest('base64');
+        
+        signatureIsValid = signature === sig1 || signature === sig2 || signature === sig3 || signature === sig4;
         
         logger.info('Signature verification:', {
           received: signature,
-          expected: expectedSig,
+          method1_hex: sig1,
+          method2_sorted: sig2,
+          method3_clean: sig3,
+          method4_base64: sig4,
+          isValid: signatureIsValid,
           rawBodyLength: req.rawBody ? req.rawBody.length : 0,
-          secretSet: !!NOWPAYMENTS_IPN_SECRET
+          secretLength: NOWPAYMENTS_IPN_SECRET.length,
+          isProduction
         });
+        
+        if (!signatureIsValid) {
+          if (isProduction) {
+            logger.error('🚫 Invalid webhook signature - rejecting payment in production mode');
+            return res.status(403).json({ 
+              error: 'Invalid signature',
+              message: 'Webhook signature verification failed. Payment rejected for security.'
+            });
+          } else {
+            logger.warn('⚠️ Invalid webhook signature - allowing in development mode (set NODE_ENV=production for strict validation)');
+          }
+        } else {
+          logger.info('✅ Webhook signature verified successfully');
+        }
+        
       } catch (err) {
-        logger.error('Error calculating webhook signature:', err);
-        return res.status(500).json({ error: 'Internal server error' });
-      }
-
-      if (signature !== expectedSig) {
-        logger.warn('⚠️ Invalid webhook signature - continuing anyway for development');
-        // Don't reject in development, just log the warning
-        // return res.status(403).json({ error: 'Invalid signature' });
+        logger.error('Error during signature verification:', err);
+        if (isProduction) {
+          return res.status(500).json({ 
+            error: 'Signature verification failed',
+            message: 'Unable to verify webhook authenticity'
+          });
+        } else {
+          logger.warn('Signature verification error in development - continuing anyway');
+        }
       }
     } else {
-      if (!signature) {
-        logger.warn('No webhook signature provided');
-      }
+      const missingComponents = [];
+      if (!signature) missingComponents.push('x-nowpayments-sig header');
       if (!NOWPAYMENTS_IPN_SECRET || NOWPAYMENTS_IPN_SECRET === 'your_ipn_secret_here') {
-        logger.warn('IPN secret not properly configured');
+        missingComponents.push('IPN secret configuration');
+      }
+      
+      if (isProduction && missingComponents.length > 0) {
+        logger.error(`🚫 Missing required webhook security components in production: ${missingComponents.join(', ')}`);
+        return res.status(400).json({ 
+          error: 'Missing webhook verification data',
+          message: 'Required security headers or configuration missing',
+          missing: missingComponents
+        });
+      } else {
+        logger.warn(`⚠️ Missing webhook security components (${missingComponents.join(', ')}) - allowing in development mode`);
       }
     }
 
@@ -1479,13 +1878,33 @@ app.post('/api/payment/webhook', async (req, res) => {
     
     // Check if this payment was already processed (idempotency)
     const paymentId = req.body.payment_id || req.body.invoice_id;
+    
+    // Check both Wager records and a simple processed payments tracking
     const existingPayment = await Wager.findOne({ 
       'meta.paymentId': paymentId,
       'meta.processed': true 
     });
     
+    // Also check if we've seen this specific order_id + payment_status combination
+    const processedKey = `${order_id}_${payment_status}_${paymentId}`;
+    if (transactions.has(processedKey)) {
+      logger.warn(`Payment ${paymentId} with status ${payment_status} already processed for order ${order_id}`);
+      return res.status(200).json({ message: 'Payment already processed' });
+    }
+    
+    // Also check if it's in the user's processedPayments array in the database
+    const userWithProcessedPayment = await User.findOne({
+      _id: userId,
+      'processedPayments.orderKey': processedKey
+    });
+    
+    if (userWithProcessedPayment) {
+      logger.warn(`Payment ${paymentId} with status ${payment_status} found in user's processedPayments`);
+      return res.status(200).json({ message: 'Payment already processed (from database)' });
+    }
+    
     if (existingPayment) {
-      logger.warn(`Payment ${paymentId} already processed`);
+      logger.warn(`Payment ${paymentId} already processed (found in Wager records)`);
       return res.status(200).json({ message: 'Payment already processed' });
     }
     
@@ -1507,42 +1926,64 @@ app.post('/api/payment/webhook', async (req, res) => {
       const previousBalance = user.balance;
       user.balance += amount;
       
-      logger.info(`Processing deposit for user ${userId}: $${amount} (${previousBalance} -> ${user.balance})`);
+      // Add to unwagered amount for wagering requirements (track total deposits that need wagering)
+      if (!user.unwageredAmount) {
+        user.unwageredAmount = 0;
+      }
+      user.unwageredAmount += amount;
+      
+      // Initialize wagering tracking if needed
+      if (!user.wageringProgress) {
+        user.wageringProgress = {
+          totalDeposited: 0,
+          totalWageredSinceDeposit: 0
+        };
+      }
+      
+      // Track this deposit
+      user.wageringProgress.totalDeposited += amount;
+      
+      logger.info(`Processing deposit for user ${userId}: $${amount} (${previousBalance} -> ${user.balance}, unwagered: ${user.unwageredAmount})`);
       
       // Update deposit status
       if (req.body.invoice_id) {
         await User.findOneAndUpdate(
           { _id: userId, "depositRequests.depositId": req.body.invoice_id },
-          { $set: { "depositRequests.$.status": "completed" } }
+          { 
+            $set: { 
+              "depositRequests.$.status": "completed"
+            }
+          }
         );
       }
       
       await user.save();
       logger.info(`User balance saved: ${user.balance}`);
 
-      // Create a transaction record
-      const transaction = new Wager({
-        userId,
-        amount,
-        gameType: 'deposit',
-        outcome: 'win',
-        profit: amount,
-        meta: {
+      // Create a transaction record using recordWager helper to ensure proper validation
+      try {
+        const transaction = await recordWager(userId, 'manual', amount, {
+          type: 'deposit',
           paymentId,
           processed: true,
           paymentDetails: req.body
-        }
-      });
-      
-      await transaction.save();
-      logger.info(`Transaction record created: ${transaction._id}`);
+        });
+        
+        // Update the wager to reflect it as a deposit (win outcome, profit = amount)
+        await updateWagerOutcome(transaction._id, 'win', amount);
+        
+        logger.info(`Transaction record created: ${transaction._id}`);
+      } catch (wagerError) {
+        logger.error('Failed to create transaction record:', wagerError);
+        // Continue processing even if transaction record fails
+      }
 
       // Notify frontend in real-time
       const notificationData = {
         newBalance: user.balance,
         amount: amount,
         transaction: {
-          id: transaction._id,
+          id: paymentId,
           type: 'deposit',
           amount,
           timestamp: new Date()
@@ -1551,6 +1992,41 @@ app.post('/api/payment/webhook', async (req, res) => {
       
       logger.info(`Sending balance update notification to user-${userId}:`, notificationData);
       io.to(`user-${userId}`).emit('balance_update', notificationData);
+
+      // Mark this payment as processed to prevent duplicates (in-memory)
+      const timestamp = new Date();
+      transactions.set(processedKey, {
+        timestamp,
+        userId,
+        amount,
+        paymentId
+      });
+      
+      // Also store in database for persistent storage
+      try {
+        await User.findByIdAndUpdate(userId, {
+          $addToSet: {
+            processedPayments: {
+              paymentId,
+              orderKey: processedKey,
+              status: payment_status,
+              amount,
+              createdAt: timestamp
+            }
+          }
+        });
+        logger.info(`Added payment ${paymentId} to user's processedPayments array`);
+      } catch (err) {
+        logger.warn(`Failed to add payment to user's processedPayments array: ${err.message}`);
+        // Continue processing even if this fails
+      }
+      
+      // Clean up old transactions from memory (keep only last 1000)
+      if (transactions.size > 1000) {
+        const entries = Array.from(transactions.entries());
+        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+        entries.slice(0, 500).forEach(([key]) => transactions.delete(key));
+      }
 
       logger.info(`💰 Deposit success: User ${userId} +$${amount} (Payment ID: ${paymentId})`);
       return res.status(200).json({ success: true });
@@ -1698,7 +2174,23 @@ app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: 'KYC verification required for withdrawals over $1000' });
     }
 
-    // Check for minimum wagering requirement to prevent abuse
+    // Check for unwagered deposits
+    if (!user.unwageredAmount) {
+      user.unwageredAmount = 0;
+    }
+    
+    if (user.unwageredAmount > 0) {
+      return res.status(403).json({
+        error: 'Wagering requirement not met',
+        details: {
+          unwageredAmount: user.unwageredAmount,
+          message: `You must wager $${user.unwageredAmount.toFixed(2)} before withdrawing`,
+          requirement: `${WAGER_REQUIREMENT_MULTIPLIER}x deposit amount`
+        }
+      });
+    }
+    
+    // Legacy check (remove in future versions)
     if (user.totalWagered < amount * 1.5) {
       return res.status(403).json({ 
         error: 'Wagering requirement not met',
@@ -1901,8 +2393,64 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     // Record the wager
     const wager = await recordWager(req.userId, 'coinflip', amount);
     
-    // Track wager in user stats
-    await user.trackWager(amount, 'coinflip');
+    // Track wager in user stats and reduce unwagered amount
+    // Process unwagered amount for wagering requirements
+    if (user.unwageredAmount === undefined) {
+      user.unwageredAmount = 0;
+    }
+    
+    // Track wagering progress for requirements
+    if (!user.wageringProgress) {
+      user.wageringProgress = {
+        totalDeposited: user.unwageredAmount || 0,
+        totalWageredSinceDeposit: 0
+      };
+    }
+    
+    // Add this wager to total wagered
+    user.wageringProgress.totalWageredSinceDeposit += amount;
+    
+    // Check if wagering requirement is now met
+    const requiredWagering = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
+    if (user.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
+      // Requirement met - reset counters
+      user.unwageredAmount = 0;
+      user.wageringProgress = {
+        totalDeposited: 0,
+        totalWageredSinceDeposit: 0
+      };
+      logger.info(`User ${req.userId} completed wagering requirements! Total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, Required: $${requiredWagering}`);
+    } else {
+      // Still have requirements to meet
+      const remaining = requiredWagering - user.wageringProgress.totalWageredSinceDeposit;
+      user.unwageredAmount = remaining;
+      logger.info(`User ${req.userId} wagered $${amount} in coinflip, total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, still need: $${remaining.toFixed(2)}`);
+    }
+    
+    // Track wager stats
+    user.totalWagered = (user.totalWagered || 0) + amount;
+    
+    // Update user level based on new total wagering
+    updateUserLevel(user);
+    
+    // Initialize game stats
+    if (!user.gameStats) {
+      user.gameStats = new Map();
+    }
+    
+    if (!user.gameStats.has('coinflip')) {
+      user.gameStats.set('coinflip', {
+        totalWagered: 0,
+        totalGames: 0,
+        wins: 0,
+        losses: 0
+      });
+    }
+    
+    const gameStats = user.gameStats.get('coinflip');
+    gameStats.totalWagered += amount;
+    gameStats.totalGames += 1;
+    user.gameStats.set('coinflip', gameStats);
 
     // Generate provably fair result
     const serverSeed = crypto.randomBytes(16).toString('hex');
@@ -1958,6 +2506,10 @@ app.get('/api/user/stats', authMiddleware, async (req, res) => {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
     
+    // Make sure user level is updated
+    updateUserLevel(user);
+    await user.save();
+    
     // Get user's wagering stats
     const wagerStats = await Wager.aggregate([
       { $match: { userId: mongoose.Types.ObjectId(req.userId) } },
@@ -1977,10 +2529,31 @@ app.get('/api/user/stats', authMiddleware, async (req, res) => {
     // Calculate win rate
     const winRate = user.gamesPlayed > 0 ? (user.gamesWon / user.gamesPlayed) * 100 : 0;
     
+    // Get user's current level info
+    const currentLevelIndex = user.level?.current ? Math.min(user.level.current - 1, USER_LEVELS.length - 1) : 0;
+    const currentLevel = USER_LEVELS[currentLevelIndex];
+    
+    // Get next level info if not at max level
+    const nextLevelIndex = currentLevelIndex < USER_LEVELS.length - 1 ? currentLevelIndex + 1 : currentLevelIndex;
+    const nextLevel = USER_LEVELS[nextLevelIndex];
+    const isMaxLevel = currentLevelIndex === USER_LEVELS.length - 1;
+    
     res.json({
       username: user.username,
       displayName: user.displayName || user.username,
       avatar: user.avatar,
+      level: {
+        current: user.level?.current || 1,
+        name: currentLevel.name,
+        color: currentLevel.color,
+        progress: user.level?.progress || 0,
+        nextLevel: isMaxLevel ? null : nextLevel.level,
+        nextLevelName: isMaxLevel ? null : nextLevel.name,
+        requiredWagering: currentLevel.requiredWagering,
+        nextLevelRequiredWagering: isMaxLevel ? null : nextLevel.requiredWagering,
+        totalWagered: user.totalWagered || 0,
+        rewards: currentLevel.rewards
+      },
       balance: user.balance,
       referralCode: user.referralCode,
       referralLink: user.getReferralLink(),
@@ -2009,6 +2582,28 @@ app.get('/api/user/stats', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     logger.error('Error getting user stats:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get detailed user level info
+app.get('/api/user/level', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    // Make sure user level is updated
+    updateUserLevel(user);
+    await user.save();
+    
+    // Return all levels with current user position
+    res.json({
+      userLevel: user.level || { current: 1, progress: 0, totalWagered: 0 },
+      levels: USER_LEVELS,
+      totalWagered: user.totalWagered || 0
+    });
+  } catch (err) {
+    logger.error('Get user level error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -2064,28 +2659,118 @@ app.get('/api/leaderboard', async (req, res) => {
   }
 });
 
-// Admin endpoints
+// Admin endpoints for wagering settings
+app.post('/api/admin/wagering/settings', authMiddleware, adminMiddleware, async (req, res) => {
+  const { multiplier } = req.body;
+  
+  if (multiplier === undefined || isNaN(multiplier) || multiplier < 0) {
+    return res.status(400).json({ error: 'Invalid multiplier value' });
+  }
+  
+  // Update the global multiplier
+  const oldMultiplier = WAGER_REQUIREMENT_MULTIPLIER;
+  WAGER_REQUIREMENT_MULTIPLIER = parseFloat(multiplier);
+  
+  logger.info(`Admin ${req.userId} updated wagering requirement multiplier from ${oldMultiplier}x to ${WAGER_REQUIREMENT_MULTIPLIER}x`);
+  
+  return res.json({
+    success: true,
+    oldMultiplier,
+    newMultiplier: WAGER_REQUIREMENT_MULTIPLIER,
+    message: `Wagering requirement updated to ${WAGER_REQUIREMENT_MULTIPLIER}x`
+  });
+});
+
+app.get('/api/admin/wagering/settings', authMiddleware, adminMiddleware, async (req, res) => {
+  return res.json({
+    multiplier: WAGER_REQUIREMENT_MULTIPLIER
+  });
+});
+
+// Reset a user's wagering requirements (for special cases or VIPs)
+app.post('/api/admin/user/:userId/reset-wagering', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const previousAmount = user.unwageredAmount || 0;
+    user.unwageredAmount = 0;
+    await user.save();
+    
+    logger.info(`Admin ${req.userId} reset wagering requirements for user ${userId} (was: $${previousAmount})`);
+    
+    return res.json({
+      success: true,
+      userId,
+      previousAmount,
+      currentAmount: 0,
+      message: `Wagering requirements reset for user ${userId}`
+    });
+  } catch (err) {
+    logger.error('Error resetting user wagering:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// User list with wagering info
 app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    const { page = 1, limit = 20, search } = req.query;
+    const { page = 1, limit = 20, search, sortBy = 'createdAt', sortOrder = -1 } = req.query;
     
     let query = {};
     if (search) {
       query = { username: { $regex: search, $options: 'i' } };
     }
     
+    // Add filter for users with wagering requirements
+    if (req.query.hasWageringRequirements === 'true') {
+      query.unwageredAmount = { $gt: 0 };
+    } else if (req.query.hasWageringRequirements === 'false') {
+      query.unwageredAmount = { $lte: 0 };
+    }
+    
+    // Sort options
+    const sortOptions = {};
+    sortOptions[sortBy] = parseInt(sortOrder);
+    
     const users = await User.find(query)
       .select('-passwordHash')
-      .sort({ createdAt: -1 })
+      .sort(sortOptions)
       .skip((page - 1) * limit)
       .limit(parseInt(limit));
     
     const total = await User.countDocuments(query);
     
+    // Enhance user objects with wagering status
+    const enhancedUsers = users.map(user => {
+      const userObj = user.toObject();
+      
+      // Ensure unwageredAmount is defined
+      if (userObj.unwageredAmount === undefined) {
+        userObj.unwageredAmount = 0;
+      }
+      
+      // Add wagering status
+      userObj.wageringStatus = {
+        hasRequirements: userObj.unwageredAmount > 0,
+        unwageredAmount: userObj.unwageredAmount || 0,
+        canWithdraw: (userObj.unwageredAmount || 0) <= 0
+      };
+      
+      return userObj;
+    });
+    
     res.json({
-      users,
+      users: enhancedUsers,
       totalPages: Math.ceil(total / limit),
-      currentPage: page
+      currentPage: parseInt(page),
+      wageringSettings: {
+        multiplier: WAGER_REQUIREMENT_MULTIPLIER
+      }
     });
   } catch (err) {
     logger.error('Admin users error:', err);
@@ -2093,10 +2778,79 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
   }
 });
 
+// Admin endpoint to manage processed payments cache
+app.post('/api/admin/payment-cache', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { action } = req.body;
+    
+    if (action === 'clear') {
+      // Clear in-memory payment cache
+      const oldSize = transactions.size;
+      transactions.clear();
+      
+      logger.info(`🧹 Admin cleared payment cache (${oldSize} entries removed)`);
+      return res.json({ 
+        success: true, 
+        message: `Payment cache cleared (${oldSize} entries removed)`,
+        previousSize: oldSize,
+        currentSize: 0
+      });
+    } else if (action === 'stats') {
+      // Return stats about the cache
+      return res.json({
+        size: transactions.size,
+        oldestEntry: transactions.size > 0 ? 
+          Array.from(transactions.values()).sort((a, b) => a.timestamp - b.timestamp)[0] : 
+          null,
+        newestEntry: transactions.size > 0 ?
+          Array.from(transactions.values()).sort((a, b) => b.timestamp - a.timestamp)[0] :
+          null
+      });
+    } else if (action === 'persist') {
+      // Persist all in-memory entries to database
+      let savedCount = 0;
+      let errorCount = 0;
+      
+      for (const [key, entry] of transactions.entries()) {
+        try {
+          // Find the user and add payment to their processedPayments array
+          await User.findByIdAndUpdate(entry.userId, {
+            $addToSet: {
+              processedPayments: {
+                paymentId: entry.paymentId,
+                orderKey: key,
+                status: key.split('_')[2] || 'unknown',
+                amount: entry.amount,
+                createdAt: entry.timestamp
+              }
+            }
+          });
+          savedCount++;
+        } catch (err) {
+          errorCount++;
+          logger.error(`Failed to persist payment ${key}:`, err);
+        }
+      }
+      
+      return res.json({
+        success: true,
+        savedCount,
+        errorCount,
+        totalProcessed: savedCount + errorCount
+      });
+    }
+    
+    return res.status(400).json({ error: 'Invalid action. Use "clear", "stats", or "persist"' });
+  } catch (err) {
+    logger.error('Payment cache admin error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/admin/user/:userId/update', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const { userId } = req.params;
-    const { balance, isAdmin } = req.body;
+    const { balance, isAdmin, unwageredAmount } = req.body;
     
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -2104,10 +2858,25 @@ app.post('/api/admin/user/:userId/update', authMiddleware, adminMiddleware, asyn
     if (balance !== undefined) user.balance = balance;
     if (isAdmin !== undefined) user.isAdmin = isAdmin;
     
+    // Add support for wagering requirement adjustment
+    if (unwageredAmount !== undefined) {
+      user.unwageredAmount = unwageredAmount;
+      logger.info(`Admin ${req.userId} set unwagered amount for user ${userId} to $${unwageredAmount}`);
+    }
+    
     await user.save();
     
-    logger.info(`Admin update: User ${userId} updated by ${req.username}`);
-    res.json({ message: 'User updated successfully' });
+    logger.info(`Admin update: User ${userId} updated by ${req.username || req.userId}`);
+    res.json({ 
+      message: 'User updated successfully',
+      user: {
+        id: user._id,
+        username: user.username,
+        balance: user.balance,
+        isAdmin: user.isAdmin,
+        unwageredAmount: user.unwageredAmount || 0
+      }
+    });
   } catch (err) {
     logger.error('Admin update user error:', err);
     res.status(500).json({ error: 'Server error' });
