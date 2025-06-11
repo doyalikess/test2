@@ -662,12 +662,17 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
   }
 });
 
+Here's the fix for your backend code - you need to modify the /api/payment/deposit endpoint:
+
 // Create a deposit invoice
 app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   const { amount, currency } = req.body;
   if (!amount || !currency) return res.status(400).json({ error: 'Amount and currency required' });
 
   try {
+    // Set hardcoded callback URL instead of using environment variable
+    const callbackUrl = 'https://test2-e7gb.onrender.com/api/payment/webhook';
+    
     const response = await axios.post(
       'https://api.nowpayments.io/v1/invoice',
       {
@@ -675,7 +680,10 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
         price_currency: 'usd',
         pay_currency: currency.toLowerCase(),
         order_id: `deposit_${req.userId}_${Date.now()}`,
-        ipn_callback_url: `${process.env.BASE_URL}/api/payment/webhook`,
+        ipn_callback_url: callbackUrl,
+        // Or alternatively, omit the callback for testing:
+        // success_url: 'https://dgenrand0.vercel.app/deposit-success',
+        // cancel_url: 'https://dgenrand0.vercel.app/deposit-cancel'
       },
       { headers: { 'x-api-key': NOWPAYMENTS_API_KEY } }
     );
