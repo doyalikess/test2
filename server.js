@@ -17,14 +17,14 @@ const wagerRouter = require('./routes/wager').router; // New import for wager ro
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
 
 // Set referral reward percentage
-const REFERRAL_REWARD_PERCENT = 10; // 10% of referred user's wagers
+const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || 'H5RMGFD-DDJMKFB-QEKXXBP-6VA0PX1';
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || crypto.randomBytes(16).toString('hex');
 const CALLBACK_URL = 'https://test2-e7gb.onrender.com/api/payment/webhook';
-const FRONTEND_URL = 'http://localhost:3000/';
+const FRONTEND_URL = 'http://localhost:3000';
 
 // Create custom logger
 const logger = {
@@ -37,6 +37,83 @@ const logger = {
   error: (message, ...args) => {
     console.error(`[ERROR] ${message}`, ...args);
   }
+};
+
+// Custom rate limiter implementation
+class RateLimiter {
+  constructor(windowMs, maxRequests, message) {
+    this.windowMs = windowMs;
+    this.maxRequests = maxRequests;
+    this.message = message || { error: 'Too many requests, please try again later' };
+    this.requests = new Map();
+    
+    // Clean up old requests every 5 minutes
+    setInterval(() => this.cleanup(), 5 * 60 * 1000);
+  }
+  
+  cleanup() {
+    const now = Date.now();
+    for (const [key, timestamps] of this.requests.entries()) {
+      // Filter out timestamps that are older than the window
+      const validTimestamps = timestamps.filter(ts => now - ts < this.windowMs);
+      
+      if (validTimestamps.length === 0) {
+        this.requests.delete(key);
+      } else {
+        this.requests.set(key, validTimestamps);
+      }
+    }
+  }
+  
+  middleware() {
+    return (req, res, next) => {
+      const key = req.ip || req.connection.remoteAddress;
+      
+      const now = Date.now();
+      const requestTimestamps = this.requests.get(key) || [];
+      
+      // Filter out timestamps older than the window
+      const validTimestamps = requestTimestamps.filter(ts => now - ts < this.windowMs);
+      
+      if (validTimestamps.length < this.maxRequests) {
+        // Add current timestamp and store
+        validTimestamps.push(now);
+        this.requests.set(key, validTimestamps);
+        
+        next();
+      } else {
+        // Rate limit exceeded
+        res.status(429).json(this.message);
+      }
+    };
+  }
+}
+
+// Create rate limiters
+const authLimiter = new RateLimiter(
+  15 * 60 * 1000, // 15 minutes
+  20, // limit each IP to 20 requests per window
+  { error: 'Too many login attempts, please try again later' }
+);
+
+const apiLimiter = new RateLimiter(
+  60 * 1000, // 1 minute
+  60, // limit each IP to 60 requests per minute
+  { error: 'Too many requests, please try again later' }
+);
+
+// Cache for crypto prices
+const cryptoPriceCache = {
+  prices: {},
+  lastFetch: 0,
+  cacheDuration: 5 * 60 * 1000, // 5 minutes
+};
+
+// Advanced security tracking
+const securityEvents = {
+  loginAttempts: new Map(), // IP -> [timestamps]
+  suspiciousActivities: [], // Array of suspicious events
+  blockedIPs: new Set(), // Set of blocked IPs
 };
 
 const app = express();
@@ -127,6 +204,120 @@ function verifyTransaction(transactionId, userId, amount, type) {
   }
   
   return true;
+}
+
+// Fetch current cryptocurrency prices
+async function fetchCryptoPrices() {
+  const now = Date.now();
+  
+  // Return cached prices if they're still fresh
+  if (now - cryptoPriceCache.lastFetch < cryptoPriceCache.cacheDuration && 
+      Object.keys(cryptoPriceCache.prices).length > 0) {
+    return cryptoPriceCache.prices;
+  }
+  
+  try {
+    // Fetch from CoinGecko API (free and doesn't require API key)
+    const response = await axios.get(
+      'https://api.coingecko.com/api/v3/simple/price',
+      {
+        params: {
+          ids: 'bitcoin,ethereum,litecoin,tether',
+          vs_currencies: 'usd',
+          include_24hr_change: true
+        }
+      }
+    );
+    
+    // Map to simpler format
+    const prices = {
+      BTC: {
+        price: response.data.bitcoin.usd,
+        change24h: response.data.bitcoin.usd_24h_change
+      },
+      ETH: {
+        price: response.data.ethereum.usd,
+        change24h: response.data.ethereum.usd_24h_change
+      },
+      LTC: {
+        price: response.data.litecoin.usd,
+        change24h: response.data.litecoin.usd_24h_change
+      },
+      USDT: {
+        price: response.data.tether.usd,
+        change24h: response.data.tether.usd_24h_change
+      }
+    };
+    
+    // Update cache
+    cryptoPriceCache.prices = prices;
+    cryptoPriceCache.lastFetch = now;
+    
+    return prices;
+  } catch (error) {
+    logger.error('Error fetching crypto prices:', error);
+    
+    // Return cached prices if available, or empty object
+    return cryptoPriceCache.prices || {};
+  }
+}
+
+// Calculate USD to crypto conversion
+function calculateCryptoAmount(usdAmount, cryptoPrice) {
+  if (!cryptoPrice || cryptoPrice <= 0) {
+    return 0;
+  }
+  
+  return parseFloat((usdAmount / cryptoPrice).toFixed(8));
+}
+
+// Track suspicious activity
+function trackSuspiciousActivity(type, details) {
+  securityEvents.suspiciousActivities.push({
+    type,
+    details,
+    timestamp: new Date()
+  });
+  
+  // Keep only last 1000 events
+  if (securityEvents.suspiciousActivities.length > 1000) {
+    securityEvents.suspiciousActivities.shift();
+  }
+  
+  // Log suspicious activity
+  logger.warn(`Suspicious activity detected: ${type}`, details);
+}
+
+// Check if IP is blocked
+function isIPBlocked(ip) {
+  return securityEvents.blockedIPs.has(ip);
+}
+
+// Track login attempt
+function trackLoginAttempt(ip, success, username) {
+  const attempts = securityEvents.loginAttempts.get(ip) || [];
+  
+  attempts.push({
+    timestamp: Date.now(),
+    success,
+    username
+  });
+  
+  // Keep only last 10 attempts
+  if (attempts.length > 10) {
+    attempts.shift();
+  }
+  
+  securityEvents.loginAttempts.set(ip, attempts);
+  
+  // Check for brute force attacks
+  const recentAttempts = attempts.filter(a => Date.now() - a.timestamp < 10 * 60 * 1000); // Last 10 minutes
+  const failedAttempts = recentAttempts.filter(a => !a.success);
+  
+  if (failedAttempts.length >= 5) {
+    securityEvents.blockedIPs.add(ip);
+    trackSuspiciousActivity('brute_force', { ip, failedAttempts });
+  }
 }
 
 async function startJackpotGame(io) {
@@ -669,6 +860,17 @@ app.use(
   })
 );
 
+// Security middleware - check for blocked IPs
+app.use((req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  
+  if (isIPBlocked(ip)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  
+  next();
+});
+
 // Middleware to capture raw body (needed for webhook signature verification)
 const rawBodySaver = (req, res, buf, encoding) => {
   if (buf && buf.length) {
@@ -676,6 +878,10 @@ const rawBodySaver = (req, res, buf, encoding) => {
   }
 };
 app.use(express.json({ verify: rawBodySaver }));
+
+// Apply rate limiters
+app.use('/api/auth/', authLimiter.middleware());
+app.use('/api/', apiLimiter.middleware());
 
 // Connect to MongoDB
 mongoose
@@ -733,8 +939,64 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    version: '1.2.0'
+    version: '1.3.0'
   });
+});
+
+// Get cryptocurrency prices
+app.get('/api/crypto/prices', async (req, res) => {
+  try {
+    const prices = await fetchCryptoPrices();
+    res.json(prices);
+  } catch (error) {
+    logger.error('Error in crypto prices endpoint:', error);
+    res.status(500).json({ error: 'Failed to fetch cryptocurrency prices' });
+  }
+});
+
+// Calculate crypto conversion
+app.get('/api/crypto/convert', async (req, res) => {
+  const { amount, from, to } = req.query;
+  
+  if (!amount || !from || !to) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+  
+  try {
+    const prices = await fetchCryptoPrices();
+    
+    // Convert amount based on current prices
+    let result = 0;
+    
+    if (from === 'USD') {
+      // USD to crypto
+      if (prices[to]) {
+        result = calculateCryptoAmount(parseFloat(amount), prices[to].price);
+      }
+    } else if (to === 'USD') {
+      // Crypto to USD
+      if (prices[from]) {
+        result = parseFloat(amount) * prices[from].price;
+      }
+    } else {
+      // Crypto to crypto
+      if (prices[from] && prices[to]) {
+        const usdValue = parseFloat(amount) * prices[from].price;
+        result = calculateCryptoAmount(usdValue, prices[to].price);
+      }
+    }
+    
+    res.json({
+      from,
+      to,
+      amount: parseFloat(amount),
+      result: parseFloat(result.toFixed(8)),
+      rate: from === 'USD' ? 1 / prices[to]?.price : prices[from]?.price
+    });
+  } catch (error) {
+    logger.error('Error in crypto conversion endpoint:', error);
+    res.status(500).json({ error: 'Failed to convert currencies' });
+  }
 });
 
 // Transaction history endpoint
@@ -755,6 +1017,8 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
 // Signup
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password, referralCode } = req.body;
+  const ip = req.ip || req.connection.remoteAddress;
+  
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
   // Validate username format
@@ -765,6 +1029,25 @@ app.post('/api/auth/signup', async (req, res) => {
   // Validate password strength
   if (password.length < 8) {
     return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+  }
+  
+  // Check for password strength
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumbers = /\d/.test(password);
+  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+  
+  const passwordStrength = 
+    (hasUpperCase ? 1 : 0) + 
+    (hasLowerCase ? 1 : 0) + 
+    (hasNumbers ? 1 : 0) + 
+    (hasSpecialChar ? 1 : 0);
+  
+  if (passwordStrength < 3) {
+    return res.status(400).json({ 
+      error: 'Password too weak. Include uppercase, lowercase, numbers, and special characters.',
+      passwordStrength
+    });
   }
 
   try {
@@ -796,6 +1079,10 @@ app.post('/api/auth/signup', async (req, res) => {
     // Welcome bonus
     user.balance = 10; // $10 welcome bonus
     
+    // Record IP address for security
+    user.registrationIP = ip;
+    user.ipHistory = [{ ip, timestamp: new Date() }];
+    
     await user.save();
 
     logger.info(`New user registered: ${username}`);
@@ -809,17 +1096,55 @@ app.post('/api/auth/signup', async (req, res) => {
 // Login
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
+  const ip = req.ip || req.connection.remoteAddress;
+  
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
   try {
     const user = await User.findOne({ username });
-    if (!user) return res.status(400).json({ error: 'Invalid credentials' });
+    
+    // Track login attempt
+    if (!user) {
+      trackLoginAttempt(ip, false, username);
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
 
     const valid = await user.validatePassword(password);
-    if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
+    if (!valid) {
+      trackLoginAttempt(ip, false, username);
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
     
-    // Update last login time
+    // Login successful
+    trackLoginAttempt(ip, true, username);
+    
+    // Update last login time and IP
     user.lastLoginTime = new Date();
+    user.lastLoginIP = ip;
+    
+    // Update IP history
+    user.ipHistory = user.ipHistory || [];
+    user.ipHistory.push({ ip, timestamp: new Date() });
+    
+    // Keep only last 10 IP entries
+    if (user.ipHistory.length > 10) {
+      user.ipHistory = user.ipHistory.slice(-10);
+    }
+    
+    // Check for suspicious location changes
+    if (user.ipHistory.length > 1) {
+      const previousIP = user.ipHistory[user.ipHistory.length - 2].ip;
+      if (previousIP !== ip) {
+        // This could be enhanced with actual geolocation checking
+        trackSuspiciousActivity('ip_change', { 
+          userId: user._id, 
+          username: user.username,
+          previousIP,
+          newIP: ip
+        });
+      }
+    }
+    
     await user.save();
 
     const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
@@ -902,6 +1227,25 @@ app.post('/api/auth/change-password', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'New password must be at least 8 characters long' });
   }
   
+  // Check for password strength
+  const hasUpperCase = /[A-Z]/.test(newPassword);
+  const hasLowerCase = /[a-z]/.test(newPassword);
+  const hasNumbers = /\d/.test(newPassword);
+  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(newPassword);
+  
+  const passwordStrength = 
+    (hasUpperCase ? 1 : 0) + 
+    (hasLowerCase ? 1 : 0) + 
+    (hasNumbers ? 1 : 0) + 
+    (hasSpecialChar ? 1 : 0);
+  
+  if (passwordStrength < 3) {
+    return res.status(400).json({ 
+      error: 'Password too weak. Include uppercase, lowercase, numbers, and special characters.',
+      passwordStrength
+    });
+  }
+  
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -936,6 +1280,10 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   }
 
   try {
+    // Get current crypto prices to show approximate crypto amount
+    const prices = await fetchCryptoPrices();
+    const cryptoAmount = calculateCryptoAmount(amount, prices[currency.toUpperCase()]?.price || 0);
+    
     // Generate transaction ID
     const transactionId = generateTransactionId();
     
@@ -977,6 +1325,7 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
           depositId: response.data.id,
           amount,
           currency,
+          cryptoAmount,
           status: 'pending',
           createdAt: new Date()
         }
@@ -986,6 +1335,8 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
     res.json({
       deposit_url: response.data.invoice_url,
       deposit_id: response.data.id,
+      cryptoAmount,
+      cryptoPrice: prices[currency.toUpperCase()]?.price || 0
     });
   } catch (error) {
     logger.error('NowPayments error:', error.response?.data || error.message);
@@ -1013,12 +1364,18 @@ app.post('/api/payment/deposit-test', authMiddleware, async (req, res) => {
   if (!amount || !currency) return res.status(400).json({ error: 'Amount and currency required' });
 
   try {
+    // Get current crypto prices to show approximate crypto amount
+    const prices = await fetchCryptoPrices();
+    const cryptoAmount = calculateCryptoAmount(amount, prices[currency.toUpperCase()]?.price || 0);
+    
     // Generate a mock deposit URL that can be used for testing
-    const mockUrl = `${FRONTEND_URL}/mock-payment?amount=${amount}&currency=${currency}&userId=${req.userId}`;
+    const mockUrl = `${FRONTEND_URL}/mock-payment?amount=${amount}&currency=${currency}&userId=${req.userId}&cryptoAmount=${cryptoAmount}`;
     
     res.json({
       deposit_url: mockUrl,
       deposit_id: `mock_${Date.now()}`,
+      cryptoAmount,
+      cryptoPrice: prices[currency.toUpperCase()]?.price || 0,
       test: true
     });
   } catch (error) {
@@ -1248,9 +1605,25 @@ app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Unsupported currency' });
   }
 
-  // Validate address (basic validation, would need to be improved for production)
-  if (address.length < 15) {
-    return res.status(400).json({ error: 'Invalid cryptocurrency address' });
+  // Validate address format based on currency
+  let validAddress = false;
+  
+  if (currency === 'BTC') {
+    // Basic Bitcoin address validation
+    validAddress = /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/.test(address);
+  } else if (currency === 'ETH') {
+    // Basic Ethereum address validation
+    validAddress = /^0x[a-fA-F0-9]{40}$/.test(address);
+  } else if (currency === 'LTC') {
+    // Basic Litecoin address validation
+    validAddress = /^[LM3][a-km-zA-HJ-NP-Z1-9]{26,33}$/.test(address);
+  } else if (currency === 'USDT') {
+    // USDT can be on multiple chains, accept Ethereum format
+    validAddress = /^0x[a-fA-F0-9]{40}$/.test(address);
+  }
+  
+  if (!validAddress) {
+    return res.status(400).json({ error: `Invalid ${currency} address format` });
   }
 
   try {
@@ -1287,6 +1660,10 @@ app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
     if (!verifyTransaction(transactionId, req.userId, amount, 'withdraw')) {
       return res.status(429).json({ error: 'Duplicate withdrawal request. Please wait before trying again.' });
     }
+    
+    // Get crypto price for informational purposes
+    const prices = await fetchCryptoPrices();
+    const cryptoAmount = calculateCryptoAmount(amount, prices[currency]?.price || 0);
 
     // Deduct user balance
     user.balance -= amount;
@@ -1296,6 +1673,7 @@ app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
     user.withdrawals.push({
       amount,
       currency,
+      cryptoAmount,
       address,
       status: 'pending',
       timestamp: new Date(),
@@ -1313,6 +1691,7 @@ app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
       profit: -amount,
       meta: {
         currency,
+        cryptoAmount,
         address,
         status: 'pending',
         transactionId
@@ -1331,6 +1710,7 @@ app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
           { name: 'User', value: user.username, inline: true },
           { name: 'Amount', value: `$${amount}`, inline: true },
           { name: 'Currency', value: currency, inline: true },
+          { name: 'Crypto Amount', value: `${cryptoAmount} ${currency}`, inline: true },
           { name: 'Address', value: address },
           { name: 'Transaction ID', value: transactionId },
           { name: 'Timestamp', value: new Date().toISOString() }
@@ -1345,10 +1725,11 @@ app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
       }
     }
 
-    logger.info(`Withdrawal request: User ${user.username} $${amount} ${currency} to ${address}`);
+    logger.info(`Withdrawal request: User ${user.username} $${amount} (${cryptoAmount} ${currency}) to ${address}`);
     res.json({ 
       message: 'Withdrawal request submitted successfully',
       transactionId,
+      cryptoAmount,
       estimatedTime: '24-48 hours'
     });
   } catch (err) {
@@ -1670,6 +2051,44 @@ app.post('/api/admin/user/:userId/update', authMiddleware, adminMiddleware, asyn
     logger.error('Admin update user error:', err);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// Admin security dashboard
+app.get('/api/admin/security', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    res.json({
+      blockedIPs: Array.from(securityEvents.blockedIPs),
+      suspiciousActivities: securityEvents.suspiciousActivities.slice(-100), // Last 100 events
+      loginAttempts: Array.from(securityEvents.loginAttempts).map(([ip, attempts]) => ({ 
+        ip, 
+        attempts: attempts.slice(-10) // Last 10 attempts
+      }))
+    });
+  } catch (err) {
+    logger.error('Admin security error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin block/unblock IP
+app.post('/api/admin/security/block-ip', authMiddleware, adminMiddleware, async (req, res) => {
+  const { ip, action } = req.body;
+  
+  if (!ip) {
+    return res.status(400).json({ error: 'IP address is required' });
+  }
+  
+  if (action === 'block') {
+    securityEvents.blockedIPs.add(ip);
+    logger.info(`Admin blocked IP: ${ip}`);
+  } else if (action === 'unblock') {
+    securityEvents.blockedIPs.delete(ip);
+    logger.info(`Admin unblocked IP: ${ip}`);
+  } else {
+    return res.status(400).json({ error: 'Invalid action' });
+  }
+  
+  res.json({ success: true, action, ip });
 });
 
 // Referral routes
