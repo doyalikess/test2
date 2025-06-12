@@ -17,7 +17,7 @@ const wagerRouter = require('./routes/wager').router; // New import for wager ro
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
 
 // Set referral reward percentage
-const REFERRAL_REWARD_PERCENT = 1; // 0% of referred user's wagers
+const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
@@ -1921,10 +1921,12 @@ app.post('/api/payment/webhook', async (req, res) => {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      // Credit balance
+      // Credit balance - set the balance exactly to previous balance + amount (no double credits)
       const amount = parseFloat(price_amount);
       const previousBalance = user.balance;
-      user.balance += amount;
+      
+      // Set balance directly to avoid double crediting issues
+      user.balance = previousBalance + amount;
       
       // Add to unwagered amount for wagering requirements (track total deposits that need wagering)
       if (!user.unwageredAmount) {
