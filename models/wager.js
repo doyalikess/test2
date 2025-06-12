@@ -9,7 +9,7 @@ const wagerSchema = new mongoose.Schema({
   },
   gameType: {
     type: String,
-    enum: ['coinflip', 'jackpot', 'mines', 'limbo', 'upgrader'],
+    enum: ['coinflip', 'jackpot', 'mines', 'limbo', 'upgrader', 'manual', 'deposit', 'withdrawal'],
     required: true
   },
   amount: {
@@ -31,6 +31,10 @@ const wagerSchema = new mongoose.Schema({
     default: 1
   },
   gameData: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
+  meta: {
     type: mongoose.Schema.Types.Mixed,
     default: {}
   },
