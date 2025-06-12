@@ -1776,7 +1776,7 @@ app.post('/api/payment/deposit-test', authMiddleware, async (req, res) => {
   }
 });
 
-// Webhook handler (NowPayments calls this when payment is confirmed)
+// Fixed webhook handler with better duplicate prevention
 app.post('/api/payment/webhook', async (req, res) => {
   try {
     // Log the raw webhook
@@ -1876,51 +1876,62 @@ app.post('/api/payment/webhook', async (req, res) => {
     // Extract user ID from order_id (format: deposit_userId_timestamp)
     const userId = order_id.split('_')[1];
     
-    // Check if this payment was already processed (idempotency)
+    // Get payment ID - this is the primary key for deduplication
     const paymentId = req.body.payment_id || req.body.invoice_id;
     
-    // Check both Wager records and a simple processed payments tracking
-    const existingPayment = await Wager.findOne({ 
+    if (!paymentId) {
+      logger.error('No payment_id found in webhook');
+      return res.status(400).json({ error: 'Payment ID required' });
+    }
+
+    // CRITICAL FIX: Use atomic database operation to prevent duplicate processing
+    // Check and mark as processed in a single atomic operation
+    const user = await User.findOneAndUpdate(
+      { 
+        _id: userId,
+        'processedPayments.paymentId': { $ne: paymentId } // Only update if payment not already processed
+      },
+      {
+        $addToSet: {
+          processedPayments: {
+            paymentId,
+            orderKey: `${order_id}_${payment_status}_${paymentId}`,
+            status: payment_status,
+            amount: parseFloat(price_amount),
+            createdAt: new Date()
+          }
+        }
+      },
+      { new: true } // Return updated document
+    );
+
+    // If user is null, it means either user doesn't exist OR payment was already processed
+    if (!user) {
+      // Check if user exists but payment was already processed
+      const existingUser = await User.findById(userId);
+      if (existingUser) {
+        const alreadyProcessed = existingUser.processedPayments.some(p => p.paymentId === paymentId);
+        if (alreadyProcessed) {
+          logger.warn(`Payment ${paymentId} already processed for user ${userId}`);
+          return res.status(200).json({ message: 'Payment already processed' });
+        }
+      }
+      logger.error('User not found for deposit:', userId);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Double-check for existing Wager records as backup
+    const existingWager = await Wager.findOne({ 
       'meta.paymentId': paymentId,
       'meta.processed': true 
     });
     
-    // Also check if we've seen this specific order_id + payment_status combination
-    const processedKey = `${order_id}_${payment_status}_${paymentId}`;
-    if (transactions.has(processedKey)) {
-      logger.warn(`Payment ${paymentId} with status ${payment_status} already processed for order ${order_id}`);
-      return res.status(200).json({ message: 'Payment already processed' });
-    }
-    
-    // Also check if it's in the user's processedPayments array in the database
-    const userWithProcessedPayment = await User.findOne({
-      _id: userId,
-      'processedPayments.orderKey': processedKey
-    });
-    
-    if (userWithProcessedPayment) {
-      logger.warn(`Payment ${paymentId} with status ${payment_status} found in user's processedPayments`);
-      return res.status(200).json({ message: 'Payment already processed (from database)' });
-    }
-    
-    if (existingPayment) {
+    if (existingWager) {
       logger.warn(`Payment ${paymentId} already processed (found in Wager records)`);
       return res.status(200).json({ message: 'Payment already processed' });
     }
     
     if (payment_status === 'finished' || payment_status === 'confirmed') {
-      if (!userId) {
-        logger.error('Invalid order ID format:', order_id);
-        return res.status(400).json({ error: 'Invalid order ID format' });
-      }
-      
-      const user = await User.findById(userId);
-      
-      if (!user) {
-        logger.error('User not found for deposit:', userId);
-        return res.status(404).json({ error: 'User not found' });
-      }
-
       // Credit balance - set the balance exactly to previous balance + amount (no double credits)
       const amount = parseFloat(price_amount);
       const previousBalance = user.balance;
@@ -1995,7 +2006,8 @@ app.post('/api/payment/webhook', async (req, res) => {
       logger.info(`Sending balance update notification to user-${userId}:`, notificationData);
       io.to(`user-${userId}`).emit('balance_update', notificationData);
 
-      // Mark this payment as processed to prevent duplicates (in-memory)
+      // Mark this payment as processed in memory as backup (but main check is database)
+      const processedKey = `${order_id}_${payment_status}_${paymentId}`;
       const timestamp = new Date();
       transactions.set(processedKey, {
         timestamp,
@@ -2003,25 +2015,6 @@ app.post('/api/payment/webhook', async (req, res) => {
         amount,
         paymentId
       });
-      
-      // Also store in database for persistent storage
-      try {
-        await User.findByIdAndUpdate(userId, {
-          $addToSet: {
-            processedPayments: {
-              paymentId,
-              orderKey: processedKey,
-              status: payment_status,
-              amount,
-              createdAt: timestamp
-            }
-          }
-        });
-        logger.info(`Added payment ${paymentId} to user's processedPayments array`);
-      } catch (err) {
-        logger.warn(`Failed to add payment to user's processedPayments array: ${err.message}`);
-        // Continue processing even if this fails
-      }
       
       // Clean up old transactions from memory (keep only last 1000)
       if (transactions.size > 1000) {
