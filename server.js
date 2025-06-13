@@ -1750,6 +1750,473 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   }
 });
 
+// Free Coins Backend Endpoints
+
+// Get free coins status
+app.get('/api/user/free-coins-status', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if user has already claimed free coins
+    const hasClaimed = user.freeCoinsClaimedAt ? true : false;
+
+    res.json({
+      claimed: hasClaimed,
+      claimedAt: user.freeCoinsClaimedAt || null
+    });
+  } catch (err) {
+    logger.error('Error checking free coins status:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Claim free coins (one-time only per account)
+app.post('/api/user/claim-free-coins', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if user has already claimed free coins
+    if (user.freeCoinsClaimedAt) {
+      return res.status(400).json({ 
+        error: 'Free coins already claimed',
+        claimedAt: user.freeCoinsClaimedAt
+      });
+    }
+
+    // Award 3 free cases (equivalent to $3 balance)
+    const freeAmount = 3;
+    const casesAwarded = 3;
+
+    user.balance += freeAmount;
+    user.freeCoinsClaimedAt = new Date();
+
+    // Initialize free coins tracking if needed
+    if (!user.freeCoinsHistory) {
+      user.freeCoinsHistory = [];
+    }
+
+    user.freeCoinsHistory.push({
+      amount: freeAmount,
+      casesAwarded,
+      claimedAt: new Date(),
+      ipAddress: req.ip || req.connection.remoteAddress
+    });
+
+    await user.save();
+
+    // Create a transaction record
+    const transaction = new Wager({
+      userId: req.userId,
+      amount: freeAmount,
+      gameType: 'free_coins',
+      outcome: 'win',
+      profit: freeAmount,
+      meta: {
+        type: 'free_coins_claim',
+        casesAwarded,
+        firstTime: true
+      }
+    });
+    
+    await transaction.save();
+
+    logger.info(`User ${req.userId} claimed free coins: $${freeAmount} (${casesAwarded} cases)`);
+
+    res.json({
+      success: true,
+      newBalance: user.balance,
+      casesAwarded,
+      amount: freeAmount,
+      message: `Successfully claimed ${casesAwarded} free cases!`
+    });
+  } catch (err) {
+    logger.error('Error claiming free coins:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin endpoint to reset free coins for a user (for special cases)
+app.post('/api/admin/user/:userId/reset-free-coins', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const previousClaimDate = user.freeCoinsClaimedAt;
+    user.freeCoinsClaimedAt = null;
+    
+    await user.save();
+    
+    logger.info(`Admin ${req.userId} reset free coins eligibility for user ${userId} (was claimed: ${previousClaimDate})`);
+    
+    return res.json({
+      success: true,
+      userId,
+      previousClaimDate,
+      message: `Free coins eligibility reset for user ${userId}`
+    });
+  } catch (err) {
+    logger.error('Error resetting free coins:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Cases System Backend
+
+// Case types and their contents
+const CASE_TYPES = {
+  level_1: {
+    name: 'Bronze Case',
+    minLevel: 1,
+    maxLevel: 9,
+    cost: 5,
+    items: [
+      { name: 'Common Coin Bonus', type: 'balance', value: 1, rarity: 'common', weight: 40 },
+      { name: 'Small Coin Bonus', type: 'balance', value: 2, rarity: 'common', weight: 30 },
+      { name: 'Medium Coin Bonus', type: 'balance', value: 5, rarity: 'uncommon', weight: 20 },
+      { name: 'Large Coin Bonus', type: 'balance', value: 10, rarity: 'rare', weight: 8 },
+      { name: 'Mega Coin Bonus', type: 'balance', value: 25, rarity: 'epic', weight: 2 }
+    ]
+  },
+  level_2: {
+    name: 'Silver Case',
+    minLevel: 10,
+    maxLevel: 19,
+    cost: 10,
+    items: [
+      { name: 'Small Coin Bonus', type: 'balance', value: 2, rarity: 'common', weight: 35 },
+      { name: 'Medium Coin Bonus', type: 'balance', value: 5, rarity: 'common', weight: 30 },
+      { name: 'Large Coin Bonus', type: 'balance', value: 10, rarity: 'uncommon', weight: 20 },
+      { name: 'Mega Coin Bonus', type: 'balance', value: 25, rarity: 'rare', weight: 12 },
+      { name: 'Super Coin Bonus', type: 'balance', value: 50, rarity: 'epic', weight: 3 }
+    ]
+  },
+  level_3: {
+    name: 'Gold Case',
+    minLevel: 20,
+    maxLevel: 100,
+    cost: 20,
+    items: [
+      { name: 'Medium Coin Bonus', type: 'balance', value: 5, rarity: 'common', weight: 30 },
+      { name: 'Large Coin Bonus', type: 'balance', value: 10, rarity: 'common', weight: 25 },
+      { name: 'Mega Coin Bonus', type: 'balance', value: 25, rarity: 'uncommon', weight: 25 },
+      { name: 'Super Coin Bonus', type: 'balance', value: 50, rarity: 'rare', weight: 15 },
+      { name: 'Ultra Coin Bonus', type: 'balance', value: 100, rarity: 'epic', weight: 4 },
+      { name: 'Legendary Jackpot', type: 'balance', value: 500, rarity: 'legendary', weight: 1 }
+    ]
+  }
+};
+
+// Rarity colors for frontend display
+const RARITY_COLORS = {
+  common: '#9ca3af',
+  uncommon: '#22c55e',
+  rare: '#3b82f6',
+  epic: '#a855f7',
+  legendary: '#f59e0b'
+};
+
+// Function to select case type based on user level
+function getCaseTypeForLevel(userLevel) {
+  if (userLevel >= 20) return 'level_3';
+  if (userLevel >= 10) return 'level_2';
+  return 'level_1';
+}
+
+// Function to open a case and get random item
+function openCase(caseType) {
+  const caseData = CASE_TYPES[caseType];
+  if (!caseData) throw new Error('Invalid case type');
+
+  // Calculate total weight
+  const totalWeight = caseData.items.reduce((sum, item) => sum + item.weight, 0);
+  
+  // Generate random number
+  let random = Math.random() * totalWeight;
+  
+  // Select item based on weight
+  for (const item of caseData.items) {
+    if (random < item.weight) {
+      return {
+        ...item,
+        color: RARITY_COLORS[item.rarity],
+        caseName: caseData.name
+      };
+    }
+    random -= item.weight;
+  }
+  
+  // Fallback to last item if something goes wrong
+  const fallback = caseData.items[caseData.items.length - 1];
+  return {
+    ...fallback,
+    color: RARITY_COLORS[fallback.rarity],
+    caseName: caseData.name
+  };
+}
+
+// Get available cases for user
+app.get('/api/user/cases', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Get user level
+    const userLevel = user.level?.current || 1;
+    
+    // Get available case types based on level
+    const availableCases = [];
+    
+    for (const [caseKey, caseData] of Object.entries(CASE_TYPES)) {
+      if (userLevel >= caseData.minLevel) {
+        availableCases.push({
+          id: caseKey,
+          name: caseData.name,
+          cost: caseData.cost,
+          minLevel: caseData.minLevel,
+          maxLevel: caseData.maxLevel,
+          unlocked: userLevel >= caseData.minLevel,
+          items: caseData.items.map(item => ({
+            ...item,
+            color: RARITY_COLORS[item.rarity]
+          }))
+        });
+      }
+    }
+
+    // Get user's case inventory
+    const userCases = user.caseInventory || {};
+
+    res.json({
+      availableCases,
+      userCases,
+      userLevel,
+      balance: user.balance
+    });
+  } catch (err) {
+    logger.error('Error fetching user cases:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Open a case
+app.post('/api/user/open-case/:caseType', authMiddleware, async (req, res) => {
+  try {
+    const { caseType } = req.params;
+    const user = await User.findById(req.userId);
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const caseData = CASE_TYPES[caseType];
+    if (!caseData) {
+      return res.status(400).json({ error: 'Invalid case type' });
+    }
+
+    // Check if user has this case type in inventory
+    if (!user.caseInventory) {
+      user.caseInventory = {};
+    }
+
+    const userCaseCount = user.caseInventory[caseType] || 0;
+    if (userCaseCount <= 0) {
+      return res.status(400).json({ error: 'No cases of this type available' });
+    }
+
+    // Open the case
+    const wonItem = openCase(caseType);
+
+    // Update user inventory
+    user.caseInventory[caseType] = userCaseCount - 1;
+
+    // Apply the reward
+    if (wonItem.type === 'balance') {
+      user.balance += wonItem.value;
+    }
+
+    // Record the case opening
+    if (!user.caseHistory) {
+      user.caseHistory = [];
+    }
+
+    const caseRecord = {
+      caseType,
+      caseName: wonItem.caseName,
+      item: wonItem,
+      openedAt: new Date(),
+      balanceBefore: user.balance - (wonItem.type === 'balance' ? wonItem.value : 0),
+      balanceAfter: user.balance
+    };
+
+    user.caseHistory.unshift(caseRecord);
+
+    // Keep only last 100 case openings
+    if (user.caseHistory.length > 100) {
+      user.caseHistory = user.caseHistory.slice(0, 100);
+    }
+
+    await user.save();
+
+    // Create transaction record
+    const transaction = new Wager({
+      userId: req.userId,
+      amount: 0, // Cases are free to open
+      gameType: 'case_opening',
+      outcome: 'win',
+      profit: wonItem.type === 'balance' ? wonItem.value : 0,
+      meta: {
+        caseType,
+        caseName: wonItem.caseName,
+        itemWon: wonItem,
+        rarity: wonItem.rarity
+      }
+    });
+    
+    await transaction.save();
+
+    logger.info(`User ${req.userId} opened ${caseType} case and won: ${wonItem.name} (${wonItem.rarity})`);
+
+    res.json({
+      success: true,
+      item: wonItem,
+      newBalance: user.balance,
+      remainingCases: user.caseInventory[caseType],
+      caseRecord
+    });
+  } catch (err) {
+    logger.error('Error opening case:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Award cases to user (called when leveling up)
+async function awardLevelUpCases(userId, newLevel) {
+  try {
+    const user = await User.findById(userId);
+    if (!user) return;
+
+    const caseType = getCaseTypeForLevel(newLevel);
+    
+    // Calculate cases to award based on level
+    let casesToAward = 1;
+    if (newLevel >= 20) {
+      casesToAward = Math.floor(newLevel / 10);
+    } else if (newLevel >= 10) {
+      casesToAward = 2;
+    }
+
+    // Initialize case inventory if needed
+    if (!user.caseInventory) {
+      user.caseInventory = {};
+    }
+
+    // Award cases
+    if (!user.caseInventory[caseType]) {
+      user.caseInventory[caseType] = 0;
+    }
+    user.caseInventory[caseType] += casesToAward;
+
+    await user.save();
+
+    logger.info(`Awarded ${casesToAward} ${caseType} cases to user ${userId} for reaching level ${newLevel}`);
+
+    return {
+      casesToAward,
+      caseType,
+      caseName: CASE_TYPES[caseType].name
+    };
+  } catch (err) {
+    logger.error('Error awarding level up cases:', err);
+    return null;
+  }
+}
+
+// Get case opening history
+app.get('/api/user/case-history', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const history = user.caseHistory || [];
+    
+    res.json({
+      history: history.slice(0, 50), // Return last 50 openings
+      totalOpenings: history.length
+    });
+  } catch (err) {
+    logger.error('Error fetching case history:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin endpoint to award cases to a user
+app.post('/api/admin/user/:userId/award-cases', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { caseType, amount } = req.body;
+
+    if (!CASE_TYPES[caseType]) {
+      return res.status(400).json({ error: 'Invalid case type' });
+    }
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Initialize case inventory if needed
+    if (!user.caseInventory) {
+      user.caseInventory = {};
+    }
+
+    if (!user.caseInventory[caseType]) {
+      user.caseInventory[caseType] = 0;
+    }
+
+    user.caseInventory[caseType] += amount;
+    await user.save();
+
+    logger.info(`Admin ${req.userId} awarded ${amount} ${caseType} cases to user ${userId}`);
+
+    res.json({
+      success: true,
+      userId,
+      caseType,
+      amount,
+      newTotal: user.caseInventory[caseType],
+      message: `Awarded ${amount} ${CASE_TYPES[caseType].name} cases to user`
+    });
+  } catch (err) {
+    logger.error('Error awarding cases:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Export the award function for use in level up system
+module.exports = {
+  awardLevelUpCases,
+  CASE_TYPES,
+  RARITY_COLORS
+};
+
 // Create a MOCK deposit (for testing without real payments)
 app.post('/api/payment/deposit-test', authMiddleware, async (req, res) => {
   const { amount, currency } = req.body;
