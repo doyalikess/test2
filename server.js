@@ -1750,7 +1750,35 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   }
 });
 
-// Free Coins Backend Endpoints
+// Updated Free Coins Backend Endpoints - With Weighted Random Rewards
+
+// Helper function to get a random reward based on weighted probabilities
+const getRandomReward = () => {
+  // Define rewards and their probabilities
+  const rewards = [
+    { value: 1.00, chance: 1 },    // 1% chance for $1.00
+    { value: 0.50, chance: 9 },    // 9% chance for $0.50
+    { value: 0.20, chance: 50 },   // 50% chance for $0.20
+    { value: 0.10, chance: 40 }    // 40% chance for $0.10
+  ];
+  
+  // Calculate total weight
+  const totalChance = rewards.reduce((sum, reward) => sum + reward.chance, 0);
+  
+  // Generate random number
+  let random = Math.random() * totalChance;
+  
+  // Find the reward based on the random number
+  for (const reward of rewards) {
+    if (random < reward.chance) {
+      return reward.value;
+    }
+    random -= reward.chance;
+  }
+  
+  // Fallback (should never reach here)
+  return 0.10;
+};
 
 // Get free coins status
 app.get('/api/user/free-coins-status', authMiddleware, async (req, res) => {
@@ -1773,7 +1801,7 @@ app.get('/api/user/free-coins-status', authMiddleware, async (req, res) => {
   }
 });
 
-// Claim free coins (one-time only per account)
+// Claim free coins (one-time only per account) - WITH WEIGHTED RANDOM REWARDS
 app.post('/api/user/claim-free-coins', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
@@ -1789,11 +1817,14 @@ app.post('/api/user/claim-free-coins', authMiddleware, async (req, res) => {
       });
     }
 
-    // Award 3 free cases (equivalent to $3 balance)
-    const freeAmount = 3;
-    const casesAwarded = 3;
+    // Determine reward amount based on weighted probabilities
+    const rewardAmount = getRandomReward();
+    
+    // Calculate number of cases to award based on reward amount
+    const casesAwarded = Math.max(1, Math.floor(rewardAmount * 3)); // At least 1 case
 
-    user.balance += freeAmount;
+    // Update user balance and mark as claimed
+    user.balance += rewardAmount;
     user.freeCoinsClaimedAt = new Date();
 
     // Initialize free coins tracking if needed
@@ -1802,42 +1833,78 @@ app.post('/api/user/claim-free-coins', authMiddleware, async (req, res) => {
     }
 
     user.freeCoinsHistory.push({
-      amount: freeAmount,
+      amount: rewardAmount,
       casesAwarded,
       claimedAt: new Date(),
       ipAddress: req.ip || req.connection.remoteAddress
     });
 
+    // Award cases to inventory
+    if (!user.caseInventory) {
+      user.caseInventory = new Map();
+    }
+    
+    const currentCases = user.caseInventory.get('level_1') || 0;
+    user.caseInventory.set('level_1', currentCases + casesAwarded);
+
     await user.save();
 
-    // Create a transaction record
-    const transaction = new Wager({
-      userId: req.userId,
-      amount: freeAmount,
+    // Create a wager record for tracking
+    await new Wager({
+      userId: user._id,
       gameType: 'free_coins',
+      amount: 0, // No cost to user
       outcome: 'win',
-      profit: freeAmount,
+      profit: rewardAmount,
       meta: {
-        type: 'free_coins_claim',
+        rewardType: 'free_coins',
         casesAwarded,
-        firstTime: true
+        rewardAmount
       }
-    });
-    
-    await transaction.save();
+    }).save();
 
-    logger.info(`User ${req.userId} claimed free coins: $${freeAmount} (${casesAwarded} cases)`);
+    // Log the action
+    logger.info(`User ${req.userId} claimed free coins: $${rewardAmount.toFixed(2)} (${casesAwarded} cases)`);
 
     res.json({
       success: true,
       newBalance: user.balance,
       casesAwarded,
-      amount: freeAmount,
-      message: `Successfully claimed ${casesAwarded} free cases!`
+      amount: rewardAmount,
+      message: `Congratulations! You received $${rewardAmount.toFixed(2)} and ${casesAwarded} free case${casesAwarded !== 1 ? 's' : ''}!`
     });
   } catch (err) {
     logger.error('Error claiming free coins:', err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin endpoint to reset free coins for a user (for special cases)
+app.post('/api/admin/user/:userId/reset-free-coins', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const previousClaimDate = user.freeCoinsClaimedAt;
+    user.freeCoinsClaimedAt = null;
+    
+    await user.save();
+    
+    logger.info(`Admin ${req.userId} reset free coins eligibility for user ${userId} (was claimed: ${previousClaimDate})`);
+    
+    return res.json({
+      success: true,
+      userId,
+      previousClaimDate,
+      message: `Free coins eligibility reset for user ${userId}`
+    });
+  } catch (err) {
+    logger.error('Error resetting free coins:', err);
+    return res.status(500).json({ error: 'Server error' });
   }
 });
 
