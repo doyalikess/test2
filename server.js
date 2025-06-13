@@ -3403,3 +3403,4 @@ const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   logger.info(`🚀 Server running on port ${PORT}`);
 });
+module.exports
