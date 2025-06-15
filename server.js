@@ -1,6 +1,6 @@
 require('dotenv').config();
 const User = require('./models/user');
-const Wager = require('./models/wager');
+const Wager = require('./models/wager'); // New import for wager model
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -12,79 +12,12 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 const upgraderRouter = require('./routes/upgrader');
-const referralRouter = require('./routes/referral');
-const wagerRouter = require('./routes/wager').router;
-const { recordWager, updateWagerOutcome } = require('./routes/wager');
-const cron = require('node-cron');
-const ReferralReward = require('./models/referralReward');
+const referralRouter = require('./routes/referral'); // New import for referral routes
+const wagerRouter = require('./routes/wager').router; // New import for wager routes
+const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
 
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
-
-async function processReferralRewards() {
-  try {
-    // Find all unprocessed rewards grouped by referral owner
-    const rewardsByOwner = await ReferralReward.aggregate([
-      { $match: { processed: false } },
-      { 
-        $group: {
-          _id: "$referralOwner",
-          totalRewards: { $sum: "$amount" },
-          rewardIds: { $push: "$_id" }
-        }
-      }
-    ]);
-
-    let totalProcessed = 0;
-    let totalRewardAmount = 0;
-
-    // Process each owner's rewards
-    for (const rewardGroup of rewardsByOwner) {
-      const session = await mongoose.startSession();
-      session.startTransaction();
-      
-      try {
-        // Update user balance
-        await User.findByIdAndUpdate(
-          rewardGroup._id,
-          { $inc: { balance: rewardGroup.totalRewards } },
-          { session }
-        );
-
-        // Mark rewards as processed
-        await ReferralReward.updateMany(
-          { _id: { $in: rewardGroup.rewardIds } },
-          { $set: { processed: true } },
-          { session }
-        );
-
-        await session.commitTransaction();
-        session.endSession();
-
-        totalProcessed += rewardGroup.rewardIds.length;
-        totalRewardAmount += rewardGroup.totalRewards;
-
-        console.log(`Processed ${rewardGroup.rewardIds.length} rewards for user ${rewardGroup._id}`);
-      } catch (error) {
-        await session.abortTransaction();
-        session.endSession();
-        console.error(`Error processing rewards for user ${rewardGroup._id}:`, error);
-      }
-    }
-
-    console.log(`✅ Processed ${totalProcessed} referral rewards totaling $${totalRewardAmount}`);
-  } catch (error) {
-    console.error('❌ Error processing referral rewards:', error.message);
-  }
-}
-
-// Schedule the job to run every minute
-cron.schedule('* * * * *', () => {
-  console.log('🕐 Running scheduled referral reward processing...');
-  processReferralRewards().catch(console.error);
-});
-
-console.log('🕐 Scheduled automatic referral reward processing (every minute)');
 
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
