@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const router = express.Router();
 const User = require('../models/user');
 const Wager = require('../models/wager');
+const { processInstantReferralReward } = require('./referral');
 
 // Auth middleware - you'll need to import this from your main file or auth module
 function authMiddleware(req, res, next) {
@@ -260,6 +261,9 @@ router.get('/leaderboard', async (req, res) => {
 });
 
 // Internal function to record a wager (not exposed as an API)
+const { processInstantReferralReward } = require('./referral');
+
+// Then modify your recordWager function:
 async function recordWager(userId, gameType, amount, gameData = {}) {
   if (!mongoose.Types.ObjectId.isValid(userId)) {
     throw new Error('Invalid user ID');
@@ -276,12 +280,14 @@ async function recordWager(userId, gameType, amount, gameData = {}) {
     
     await wager.save();
     
+    // IMPORTANT NEW CODE: Process referral reward instantly
+    await processInstantReferralReward(userId, amount, gameType);
+    
     return wager;
   } catch (err) {
     console.error('Error recording wager:', err);
     throw err;
   }
-}
 
 // Update wager outcome
 async function updateWagerOutcome(wagerId, outcome, profit, multiplier = 1) {
