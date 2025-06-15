@@ -1,6 +1,6 @@
 require('dotenv').config();
 const User = require('./models/user');
-const Wager = require('./models/wager'); // New import for wager model
+const Wager = require('./models/wager');
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -12,66 +12,78 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 const upgraderRouter = require('./routes/upgrader');
-const referralRouter = require('./routes/referral'); // New import for referral routes
-const wagerRouter = require('./routes/wager').router; // New import for wager routes
-const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
+const referralRouter = require('./routes/referral');
+const wagerRouter = require('./routes/wager').router;
+const { recordWager, updateWagerOutcome } = require('./routes/wager');
 const cron = require('node-cron');
 const ReferralReward = require('./models/referralReward');
 
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
-// Add this function to your backend code that directly processes rewards
-// This bypasses the API authentication requirements
-
-function processReferralRewards() {
+async function processReferralRewards() {
   try {
-    // Direct database connection code
-    const db = require('./db'); // Your database connection
-    
-    // Process rewards directly using database queries
-    // This example assumes you have a transactions table and users table
-    const pendingRewards = db.query(`
-      SELECT 
-        referralOwner, 
-        SUM(amount) as totalRewards 
-      FROM referral_rewards 
-      WHERE processed = false 
-      GROUP BY referralOwner
-    `);
-    
+    // Find all unprocessed rewards grouped by referral owner
+    const rewardsByOwner = await ReferralReward.aggregate([
+      { $match: { processed: false } },
+      { 
+        $group: {
+          _id: "$referralOwner",
+          totalRewards: { $sum: "$amount" },
+          rewardIds: { $push: "$_id" }
+        }
+      }
+    ]);
+
     let totalProcessed = 0;
     let totalRewardAmount = 0;
-    
-    pendingRewards.forEach(reward => {
-      // Update user balance directly
-      db.query(`
-        UPDATE users 
-        SET balance = balance + $1 
-        WHERE id = $2
-      `, [reward.totalRewards, reward.referralOwner]);
+
+    // Process each owner's rewards
+    for (const rewardGroup of rewardsByOwner) {
+      const session = await mongoose.startSession();
+      session.startTransaction();
       
-      // Mark rewards as processed
-      db.query(`
-        UPDATE referral_rewards 
-        SET processed = true 
-        WHERE referralOwner = $1 AND processed = false
-      `, [reward.referralOwner]);
-      
-      totalProcessed++;
-      totalRewardAmount += reward.totalRewards;
-    });
-    
+      try {
+        // Update user balance
+        await User.findByIdAndUpdate(
+          rewardGroup._id,
+          { $inc: { balance: rewardGroup.totalRewards } },
+          { session }
+        );
+
+        // Mark rewards as processed
+        await ReferralReward.updateMany(
+          { _id: { $in: rewardGroup.rewardIds } },
+          { $set: { processed: true } },
+          { session }
+        );
+
+        await session.commitTransaction();
+        session.endSession();
+
+        totalProcessed += rewardGroup.rewardIds.length;
+        totalRewardAmount += rewardGroup.totalRewards;
+
+        console.log(`Processed ${rewardGroup.rewardIds.length} rewards for user ${rewardGroup._id}`);
+      } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+        console.error(`Error processing rewards for user ${rewardGroup._id}:`, error);
+      }
+    }
+
     console.log(`✅ Processed ${totalProcessed} referral rewards totaling $${totalRewardAmount}`);
   } catch (error) {
     console.error('❌ Error processing referral rewards:', error.message);
   }
 }
 
-// Run this function every minute using node-cron
-cron.schedule('* * * * *', processReferralRewards);
+// Schedule the job to run every minute
+cron.schedule('* * * * *', () => {
+  console.log('🕐 Running scheduled referral reward processing...');
+  processReferralRewards().catch(console.error);
+});
 
-// Log when the schedule is set up
 console.log('🕐 Scheduled automatic referral reward processing (every minute)');
 
 // Constants
