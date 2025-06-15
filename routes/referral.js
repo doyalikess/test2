@@ -1,18 +1,29 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const User = require('../models/user');
 const Wager = require('../models/wager');
 
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
-// Auth middleware - you'll need to import this from your main file or auth module
+// Fixed Auth middleware
 function authMiddleware(req, res, next) {
-  if (!req.userId) {
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+  
+  if (!token) {
     return res.status(401).json({ error: 'Authentication required' });
   }
-  next();
+  
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.userId = decoded.userId || decoded.id;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
 }
 
 // Get user's referral code
