@@ -20,32 +20,6 @@ const cron = require('node-cron');
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
-const cron = require('node-cron');
-const axios = require('axios');
-
-    // Call the reward processing endpoint internally
-    const response = await axios.post(
-      `http://localhost:${process.env.PORT || 3000}/api/referral/process-rewards`,
-      {},
-      {
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    const data = response.data;
-    if (data.totalProcessed > 0) {
-      console.log('✅ Processed referral rewards:', data);
-      console.log(`💰 Total processed: ${data.totalProcessed} users, Total rewards: $${data.totalRewards}`);
-    }
-  } catch (error) {
-    console.error('❌ Error processing referral rewards:', error.message);
-  }
-});
-
-console.log('🕐 Scheduled automatic referral reward processing (every minute)');
-
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || 'H5RMGFD-DDJMKFB-QEKXXBP-6VA0PX1';
