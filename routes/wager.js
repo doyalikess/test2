@@ -4,7 +4,6 @@ const router = express.Router();
 const User = require('../models/user');
 const Wager = require('../models/wager');
 const { processInstantReferralReward } = require('./referral');
-const ReferralReward = require('../models/referralReward');
 
 // Auth middleware - you'll need to import this from your main file or auth module
 function authMiddleware(req, res, next) {
