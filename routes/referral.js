@@ -172,4 +172,34 @@ router.post('/process-rewards', async (req, res) => {
   }
 });
 
+// Instant referral reward processing function
+async function processInstantReferralReward(userId, wagerAmount, gameType) {
+  try {
+    const user = await User.findById(userId);
+    if (!user || !user.referredBy) return;
+    
+    const rewardAmount = wagerAmount * (REFERRAL_REWARD_PERCENT / 100);
+    if (rewardAmount <= 0) return;
+    
+    // Update referrer balance immediately - no pending rewards
+    await User.findByIdAndUpdate(
+      user.referredBy,
+      { 
+        $inc: { 
+          balance: rewardAmount,
+          referralEarnings: rewardAmount 
+        } 
+      }
+    );
+    
+    console.log(`✅ Instant referral reward: $${rewardAmount.toFixed(2)} to referrer from ${userId}'s $${wagerAmount} ${gameType} wager`);
+  } catch (error) {
+    console.error('Error processing instant referral reward:', error);
+  }
+}
+
+// Export both the router and the function
+module.exports = router;
+module.exports.processInstantReferralReward = processInstantReferralReward;
+
 module.exports = router;
