@@ -21,6 +21,11 @@ const cron = require('node-cron');
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
 // Process referral rewards automatically every minute
+Removed the admin-key: 'default-admin-key' header from the client-side claim function
+Now the request just uses the user's JWT token for authentication which should be sufficient
+For your server-side cron job, you should also modify it to remove the admin-key header:
+
+// Process referral rewards automatically every minute
 cron.schedule('* * * * *', async () => {
   try {
     console.log('Starting automatic referral reward processing...');
@@ -28,11 +33,11 @@ cron.schedule('* * * * *', async () => {
     // Call the reward processing endpoint internally
     const response = await axios.post(
       `http://localhost:${process.env.PORT || 3000}/api/referral/process-rewards`,
-      {},
+      {}, // Empty request body
       {
         headers: {
-          'admin-key': process.env.ADMIN_KEY || 'default-admin-key',
-          'Authorization': 'local-server-process'
+          // Use server-side authentication or API key if needed
+          'Authorization': `Bearer ${process.env.SERVER_JWT_TOKEN}`
         }
       }
     );
@@ -40,7 +45,6 @@ cron.schedule('* * * * *', async () => {
     const data = response.data;
     if (data.totalProcessed > 0) {
       console.log('✅ Processed referral rewards:', data);
-      console.log(`💰 Total processed: ${data.totalProcessed} users, Total rewards: $${data.totalRewards}`);
     }
   } catch (error) {
     console.error('❌ Error processing referral rewards:', error.message);
