@@ -68,7 +68,6 @@ function processReferralRewards() {
 }
 
 // Run this function every minute using node-cron
-const cron = require('node-cron');
 cron.schedule('* * * * *', processReferralRewards);
 
 // Log when the schedule is set up
