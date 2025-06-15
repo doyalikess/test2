@@ -16,6 +16,7 @@ const referralRouter = require('./routes/referral'); // New import for referral 
 const wagerRouter = require('./routes/wager').router; // New import for wager routes
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
 const cron = require('node-cron');
+const ReferralReward = require('./models/referralReward');
 
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
