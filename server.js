@@ -20,8 +20,6 @@ const cron = require('node-cron');
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
-/You need to remove that text from your server.js file. Here's the correct server.js cron job code to replace the problematic section:
-
 const cron = require('node-cron');
 const axios = require('axios');
 
