@@ -91,7 +91,7 @@ class RateLimiter {
 
 // Create rate limiters
 const authLimiter = new RateLimiter(
-  15 * 60 * 1000, // 15 minutes
+  5 * 1000, // 5 seconds
   20, // limit each IP to 20 requests per window
   { error: 'Too many login attempts, please try again later' }
 );
