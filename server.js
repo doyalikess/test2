@@ -15,9 +15,39 @@ const upgraderRouter = require('./routes/upgrader');
 const referralRouter = require('./routes/referral'); // New import for referral routes
 const wagerRouter = require('./routes/wager').router; // New import for wager routes
 const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import wager helper functions
+const cron = require('node-cron');
 
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
+
+// Process referral rewards automatically every minute
+cron.schedule('* * * * *', async () => {
+  try {
+    console.log('Starting automatic referral reward processing...');
+    
+    // Call the reward processing endpoint internally
+    const response = await axios.post(
+      `http://localhost:${process.env.PORT || 3000}/api/referral/process-rewards`,
+      {},
+      {
+        headers: {
+          'admin-key': process.env.ADMIN_KEY || 'default-admin-key',
+          'Authorization': 'local-server-process'
+        }
+      }
+    );
+    
+    const data = response.data;
+    if (data.totalProcessed > 0) {
+      console.log('✅ Processed referral rewards:', data);
+      console.log(`💰 Total processed: ${data.totalProcessed} users, Total rewards: $${data.totalRewards}`);
+    }
+  } catch (error) {
+    console.error('❌ Error processing referral rewards:', error.message);
+  }
+});
+
+console.log('🕐 Scheduled automatic referral reward processing (every minute)');
 
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
