@@ -25,11 +25,6 @@ const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 const cron = require('node-cron');
 const axios = require('axios');
 
-// Process referral rewards automatically every minute
-cron.schedule('* * * * *', async () => {
-  try {
-    console.log('Starting automatic referral reward processing...');
-    
     // Call the reward processing endpoint internally
     const response = await axios.post(
       `http://localhost:${process.env.PORT || 3000}/api/referral/process-rewards`,
