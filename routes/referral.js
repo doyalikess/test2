@@ -124,50 +124,15 @@ router.get('/leaderboard', async (req, res) => {
 });
 
 // Process referral rewards (typically called by a scheduled job)
-router.post('/process-rewards', async (req, res) => {
-  // This endpoint should be secured in production
-  const adminKey = req.headers['admin-key'];
-  if (adminKey !== process.env.ADMIN_KEY && req.ip !== '127.0.0.1') {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-  
+router.post('/process-rewards', authMiddleware, async (req, res) => {
   try {
-    // Find all users with referrals
-    const users = await User.find({ referralCount: { $gt: 0 } });
-    
-    let totalProcessed = 0;
-    let totalRewards = 0;
-    
-    for (const user of users) {
-      // Get referred users
-      const referredUsers = await User.find({ referredBy: user._id });
-      
-      for (const referredUser of referredUsers) {
-        // Get wagers since last payout that haven't been credited yet
-        // This logic would need to track last payout time for each referral
-        // For simplicity, we're just calculating total potential earnings
-        
-        const referralStats = await user.getReferralStats();
-        const pendingRewards = referralStats.pendingRewards;
-        
-        if (pendingRewards > 0) {
-          // Update referrer's balance and earnings
-          user.balance += pendingRewards;
-          user.referralEarnings += pendingRewards;
-          await user.save();
-          
-          totalProcessed++;
-          totalRewards += pendingRewards;
-        }
-      }
-    }
-    
     res.json({
-      message: `Processed referral rewards for ${totalProcessed} users`,
-      totalRewards: totalRewards.toFixed(2)
+      message: 'Referral rewards are now processed instantly when bets are placed',
+      totalProcessed: 0,
+      totalRewards: 0
     });
   } catch (err) {
-    console.error('Error processing referral rewards:', err);
+    console.error('Error in process-rewards endpoint:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
