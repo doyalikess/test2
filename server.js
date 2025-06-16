@@ -111,73 +111,6 @@ const cryptoPriceCache = {
   cacheDuration: 5 * 60 * 1000, // 5 minutes
 };
 
-// ENHANCED: Global payment processing tracker with Redis-like behavior
-const paymentProcessingTracker = {
-  processing: new Map(), // paymentId -> { timestamp, userId, lockExpiry }
-  processed: new Set(), // Set of successfully processed payment IDs
-  
-  // Attempt to acquire processing lock for a payment
-  acquireLock(paymentId, userId, lockDurationMs = 30000) {
-    const now = Date.now();
-    
-    // Check if already processed
-    if (this.processed.has(paymentId)) {
-      return { acquired: false, reason: 'already_processed' };
-    }
-    
-    // Check if currently being processed
-    if (this.processing.has(paymentId)) {
-      const lock = this.processing.get(paymentId);
-      if (lock.lockExpiry > now) {
-        return { acquired: false, reason: 'currently_processing', existingUserId: lock.userId };
-      } else {
-        // Lock expired, remove it
-        this.processing.delete(paymentId);
-      }
-    }
-    
-    // Acquire lock
-    this.processing.set(paymentId, {
-      timestamp: now,
-      userId,
-      lockExpiry: now + lockDurationMs
-    });
-    
-    return { acquired: true };
-  },
-  
-  // Release processing lock and mark as processed
-  markProcessed(paymentId) {
-    this.processing.delete(paymentId);
-    this.processed.add(paymentId);
-    
-    // Cleanup old processed entries (keep only last 10000)
-    if (this.processed.size > 10000) {
-      const entries = Array.from(this.processed);
-      this.processed.clear();
-      entries.slice(-5000).forEach(id => this.processed.add(id));
-    }
-  },
-  
-  // Release lock without marking as processed (for errors)
-  releaseLock(paymentId) {
-    this.processing.delete(paymentId);
-  },
-  
-  // Cleanup expired locks periodically
-  cleanup() {
-    const now = Date.now();
-    for (const [paymentId, lock] of this.processing.entries()) {
-      if (lock.lockExpiry <= now) {
-        this.processing.delete(paymentId);
-      }
-    }
-  }
-};
-
-// Cleanup expired payment locks every minute
-setInterval(() => paymentProcessingTracker.cleanup(), 60000);
-
 // Advanced security tracking
 const securityEvents = {
   loginAttempts: new Map(), // IP -> [timestamps]
@@ -277,7 +210,9 @@ for (let i = 1; i <= 100; i++) {
     color,
     rewards: { maxBet }
   });
-}// Mines game helper functions
+}
+
+// Mines game helper functions
 function generateMinesPositions(gridSize, minesCount) {
   const positions = new Set();
   while (positions.size < minesCount) {
@@ -638,7 +573,9 @@ async function startJackpotGame(io) {
     jackpotGame.totalPot = 0;
     jackpotGame.isRunning = false;
   }, 7000);
-}io.on('connection', (socket) => {
+}
+
+io.on('connection', (socket) => {
   logger.info('🔌 A user connected');
 
   // Join user to their own room for targeted events
@@ -1469,7 +1406,9 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
     logger.error('Error fetching wagering status:', err);
     res.status(500).json({ error: 'Server error' });
   }
-});// Signup
+});
+
+// Signup
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password, referralCode } = req.body;
   const ip = req.ip || req.connection.remoteAddress;
@@ -1813,6 +1752,8 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   }
 });
 
+// Updated Free Coins Backend Endpoints - With Weighted Random Rewards
+
 // Helper function to get a random reward based on weighted probabilities
 const getRandomReward = () => {
   // Define rewards and their probabilities
@@ -1937,6 +1878,35 @@ app.post('/api/user/claim-free-coins', authMiddleware, async (req, res) => {
   } catch (err) {
     logger.error('Error claiming free coins:', err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin endpoint to reset free coins for a user (for special cases)
+app.post('/api/admin/user/:userId/reset-free-coins', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const previousClaimDate = user.freeCoinsClaimedAt;
+    user.freeCoinsClaimedAt = null;
+    
+    await user.save();
+    
+    logger.info(`Admin ${req.userId} reset free coins eligibility for user ${userId} (was claimed: ${previousClaimDate})`);
+    
+    return res.json({
+      success: true,
+      userId,
+      previousClaimDate,
+      message: `Free coins eligibility reset for user ${userId}`
+    });
+  } catch (err) {
+    logger.error('Error resetting free coins:', err);
+    return res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -2107,18 +2077,333 @@ app.get('/api/user/cases', authMiddleware, async (req, res) => {
     logger.error('Error fetching user cases:', err);
     res.status(500).json({ error: 'Server error' });
   }
-});// BULLETPROOF webhook handler with enhanced duplicate prevention
+});
+
+// Open a case
+app.post('/api/user/open-case/:caseType', authMiddleware, async (req, res) => {
+  try {
+    const { caseType } = req.params;
+    const user = await User.findById(req.userId);
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const caseData = CASE_TYPES[caseType];
+    if (!caseData) {
+      return res.status(400).json({ error: 'Invalid case type' });
+    }
+
+    // Check if user has this case type in inventory
+    if (!user.caseInventory) {
+      user.caseInventory = {};
+    }
+
+    const userCaseCount = user.caseInventory[caseType] || 0;
+    if (userCaseCount <= 0) {
+      return res.status(400).json({ error: 'No cases of this type available' });
+    }
+
+    // Open the case
+    const wonItem = openCase(caseType);
+
+    // Update user inventory
+    user.caseInventory[caseType] = userCaseCount - 1;
+
+    // Apply the reward
+    if (wonItem.type === 'balance') {
+      user.balance += wonItem.value;
+    }
+
+    // Record the case opening
+    if (!user.caseHistory) {
+      user.caseHistory = [];
+    }
+
+    const caseRecord = {
+      caseType,
+      caseName: wonItem.caseName,
+      item: wonItem,
+      openedAt: new Date(),
+      balanceBefore: user.balance - (wonItem.type === 'balance' ? wonItem.value : 0),
+      balanceAfter: user.balance
+    };
+
+    user.caseHistory.unshift(caseRecord);
+
+    // Keep only last 100 case openings
+    if (user.caseHistory.length > 100) {
+      user.caseHistory = user.caseHistory.slice(0, 100);
+    }
+
+    await user.save();
+
+    // Create transaction record
+    const transaction = new Wager({
+      userId: req.userId,
+      amount: 0, // Cases are free to open
+      gameType: 'case_opening',
+      outcome: 'win',
+      profit: wonItem.type === 'balance' ? wonItem.value : 0,
+      meta: {
+        caseType,
+        caseName: wonItem.caseName,
+        itemWon: wonItem,
+        rarity: wonItem.rarity
+      }
+    });
+    
+    await transaction.save();
+
+    logger.info(`User ${req.userId} opened ${caseType} case and won: ${wonItem.name} (${wonItem.rarity})`);
+
+    res.json({
+      success: true,
+      item: wonItem,
+      newBalance: user.balance,
+      remainingCases: user.caseInventory[caseType],
+      caseRecord
+    });
+  } catch (err) {
+    logger.error('Error opening case:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Award cases to user (called when leveling up)
+async function awardLevelUpCases(userId, newLevel) {
+  try {
+    const user = await User.findById(userId);
+    if (!user) return;
+
+    const caseType = getCaseTypeForLevel(newLevel);
+    
+    // Calculate cases to award based on level
+    let casesToAward = 1;
+    if (newLevel >= 20) {
+      casesToAward = Math.floor(newLevel / 10);
+    } else if (newLevel >= 10) {
+      casesToAward = 2;
+    }
+
+    // Initialize case inventory if needed
+    if (!user.caseInventory) {
+      user.caseInventory = {};
+    }
+
+    // Award cases
+    if (!user.caseInventory[caseType]) {
+      user.caseInventory[caseType] = 0;
+    }
+    user.caseInventory[caseType] += casesToAward;
+
+    await user.save();
+
+    logger.info(`Awarded ${casesToAward} ${caseType} cases to user ${userId} for reaching level ${newLevel}`);
+
+    return {
+      casesToAward,
+      caseType,
+      caseName: CASE_TYPES[caseType].name
+    };
+  } catch (err) {
+    logger.error('Error awarding level up cases:', err);
+    return null;
+  }
+}
+
+// Get case opening history
+app.get('/api/user/case-history', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const history = user.caseHistory || [];
+    
+    res.json({
+      history: history.slice(0, 50), // Return last 50 openings
+      totalOpenings: history.length
+    });
+  } catch (err) {
+    logger.error('Error fetching case history:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin endpoint to award cases to a user
+app.post('/api/admin/user/:userId/award-cases', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { caseType, amount } = req.body;
+
+    if (!CASE_TYPES[caseType]) {
+      return res.status(400).json({ error: 'Invalid case type' });
+    }
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Initialize case inventory if needed
+    if (!user.caseInventory) {
+      user.caseInventory = {};
+    }
+
+    if (!user.caseInventory[caseType]) {
+      user.caseInventory[caseType] = 0;
+    }
+
+    user.caseInventory[caseType] += amount;
+    await user.save();
+
+    logger.info(`Admin ${req.userId} awarded ${amount} ${caseType} cases to user ${userId}`);
+
+    res.json({
+      success: true,
+      userId,
+      caseType,
+      amount,
+      newTotal: user.caseInventory[caseType],
+      message: `Awarded ${amount} ${CASE_TYPES[caseType].name} cases to user`
+    });
+  } catch (err) {
+    logger.error('Error awarding cases:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Export the award function for use in level up system
+module.exports = {
+  awardLevelUpCases,
+  CASE_TYPES,
+  RARITY_COLORS
+};
+
+// Create a MOCK deposit (for testing without real payments)
+app.post('/api/payment/deposit-test', authMiddleware, async (req, res) => {
+  const { amount, currency } = req.body;
+  if (!amount || !currency) return res.status(400).json({ error: 'Amount and currency required' });
+
+  try {
+    // Get current crypto prices to show approximate crypto amount
+    const prices = await fetchCryptoPrices();
+    const cryptoAmount = calculateCryptoAmount(amount, prices[currency.toUpperCase()]?.price || 0);
+    
+    // Generate a mock deposit URL that can be used for testing
+    const mockUrl = `${FRONTEND_URL}/mock-payment?amount=${amount}&currency=${currency}&userId=${req.userId}&cryptoAmount=${cryptoAmount}`;
+    
+    res.json({
+      deposit_url: mockUrl,
+      deposit_id: `mock_${Date.now()}`,
+      cryptoAmount,
+      cryptoPrice: prices[currency.toUpperCase()]?.price || 0,
+      test: true
+    });
+  } catch (error) {
+    logger.error('Mock deposit error:', error);
+    res.status(500).json({ error: 'Failed to create mock deposit' });
+  }
+});
+
+// Fixed webhook handler with better duplicate prevention
 app.post('/api/payment/webhook', async (req, res) => {
-  const startTime = Date.now();
-  
   try {
     // Log the raw webhook
     logger.info('Payment webhook received:', req.body);
     
-    // Extract critical payment data first
-    const { payment_status, order_id, price_amount, payment_id, invoice_id } = req.body;
+    // Determine if we're in production mode
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.STRICT_WEBHOOK_VALIDATION === 'true';
     
-    // Validate required fields
+    // Verify signature if provided
+    const signature = req.headers['x-nowpayments-sig'];
+    if (signature && NOWPAYMENTS_IPN_SECRET && NOWPAYMENTS_IPN_SECRET !== 'your_ipn_secret_here') {
+      let signatureIsValid = false;
+      
+      try {
+        // Try different signature calculation methods that NOWPayments might use
+        const bodyString = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
+        const sortedBodyString = JSON.stringify(req.body, Object.keys(req.body).sort());
+        const cleanBodyString = JSON.stringify(req.body);
+        
+        // Method 1: Use raw body as received
+        const sig1 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(bodyString).digest('hex');
+        
+        // Method 2: Use sorted JSON keys
+        const sig2 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(sortedBodyString).digest('hex');
+        
+        // Method 3: Use clean JSON without extra whitespace
+        const sig3 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(cleanBodyString).digest('hex');
+        
+        // Method 4: Try with base64 encoding
+        const sig4 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(bodyString).digest('base64');
+        
+        signatureIsValid = signature === sig1 || signature === sig2 || signature === sig3 || signature === sig4;
+        
+        logger.info('Signature verification:', {
+          received: signature,
+          method1_hex: sig1,
+          method2_sorted: sig2,
+          method3_clean: sig3,
+          method4_base64: sig4,
+          isValid: signatureIsValid,
+          rawBodyLength: req.rawBody ? req.rawBody.length : 0,
+          secretLength: NOWPAYMENTS_IPN_SECRET.length,
+          isProduction
+        });
+        
+        if (!signatureIsValid) {
+          if (isProduction) {
+            logger.error('🚫 Invalid webhook signature - rejecting payment in production mode');
+            return res.status(403).json({ 
+              error: 'Invalid signature',
+              message: 'Webhook signature verification failed. Payment rejected for security.'
+            });
+          } else {
+            logger.warn('⚠️ Invalid webhook signature - allowing in development mode (set NODE_ENV=production for strict validation)');
+          }
+        } else {
+          logger.info('✅ Webhook signature verified successfully');
+        }
+        
+      } catch (err) {
+        logger.error('Error during signature verification:', err);
+        if (isProduction) {
+          return res.status(500).json({ 
+            error: 'Signature verification failed',
+            message: 'Unable to verify webhook authenticity'
+          });
+        } else {
+          logger.warn('Signature verification error in development - continuing anyway');
+        }
+      }
+    } else {
+      const missingComponents = [];
+      if (!signature) missingComponents.push('x-nowpayments-sig header');
+      if (!NOWPAYMENTS_IPN_SECRET || NOWPAYMENTS_IPN_SECRET === 'your_ipn_secret_here') {
+        missingComponents.push('IPN secret configuration');
+      }
+      
+      if (isProduction && missingComponents.length > 0) {
+        logger.error(`🚫 Missing required webhook security components in production: ${missingComponents.join(', ')}`);
+        return res.status(400).json({ 
+          error: 'Missing webhook verification data',
+          message: 'Required security headers or configuration missing',
+          missing: missingComponents
+        });
+      } else {
+        logger.warn(`⚠️ Missing webhook security components (${missingComponents.join(', ')}) - allowing in development mode`);
+      }
+    }
+
+    const { payment_status, order_id, price_amount } = req.body;
+    
     if (!order_id || !order_id.startsWith('deposit_')) {
       logger.warn('Invalid order ID format:', order_id);
       return res.status(400).json({ error: 'Invalid order ID format' });
@@ -2128,269 +2413,165 @@ app.post('/api/payment/webhook', async (req, res) => {
     const userId = order_id.split('_')[1];
     
     // Get payment ID - this is the primary key for deduplication
-    const paymentId = payment_id || invoice_id;
+    const paymentId = req.body.payment_id || req.body.invoice_id;
     
     if (!paymentId) {
       logger.error('No payment_id found in webhook');
       return res.status(400).json({ error: 'Payment ID required' });
     }
 
-    // CRITICAL: Attempt to acquire processing lock FIRST
-    const lockResult = paymentProcessingTracker.acquireLock(paymentId, userId);
-    
-    if (!lockResult.acquired) {
-      if (lockResult.reason === 'already_processed') {
-        logger.warn(`🔒 Payment ${paymentId} already processed completely`);
-        return res.status(200).json({ message: 'Payment already processed' });
-      } else if (lockResult.reason === 'currently_processing') {
-        logger.warn(`🔒 Payment ${paymentId} currently being processed by user ${lockResult.existingUserId}`);
-        return res.status(409).json({ message: 'Payment currently being processed' });
+    // CRITICAL FIX: Use atomic database operation to prevent duplicate processing
+    // Check and mark as processed in a single atomic operation
+    const user = await User.findOneAndUpdate(
+      { 
+        _id: userId,
+        'processedPayments.paymentId': { $ne: paymentId } // Only update if payment not already processed
+      },
+      {
+        $addToSet: {
+          processedPayments: {
+            paymentId,
+            orderKey: `${order_id}_${payment_status}_${paymentId}`,
+            status: payment_status,
+            amount: parseFloat(price_amount),
+            createdAt: new Date()
+          }
+        }
+      },
+      { new: true } // Return updated document
+    );
+
+    // If user is null, it means either user doesn't exist OR payment was already processed
+    if (!user) {
+      // Check if user exists but payment was already processed
+      const existingUser = await User.findById(userId);
+      if (existingUser) {
+        const alreadyProcessed = existingUser.processedPayments.some(p => p.paymentId === paymentId);
+        if (alreadyProcessed) {
+          logger.warn(`Payment ${paymentId} already processed for user ${userId}`);
+          return res.status(200).json({ message: 'Payment already processed' });
+        }
       }
+      logger.error('User not found for deposit:', userId);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Double-check for existing Wager records as backup
+    const existingWager = await Wager.findOne({ 
+      'meta.paymentId': paymentId,
+      'meta.processed': true 
+    });
+    
+    if (existingWager) {
+      logger.warn(`Payment ${paymentId} already processed (found in Wager records)`);
+      return res.status(200).json({ message: 'Payment already processed' });
     }
     
-    logger.info(`🔓 Acquired processing lock for payment ${paymentId}`);
-    
-    try {
-      // Determine if we're in production mode
-      const isProduction = process.env.NODE_ENV === 'production' || process.env.STRICT_WEBHOOK_VALIDATION === 'true';
+    if (payment_status === 'finished' || payment_status === 'confirmed') {
+      // Credit balance - set the balance exactly to previous balance + amount (no double credits)
+      const amount = parseFloat(price_amount);
+      const previousBalance = user.balance;
       
-      // Verify signature if provided
-      const signature = req.headers['x-nowpayments-sig'];
-      if (signature && NOWPAYMENTS_IPN_SECRET && NOWPAYMENTS_IPN_SECRET !== 'your_ipn_secret_here') {
-        let signatureIsValid = false;
-        
-        try {
-          // Try different signature calculation methods that NOWPayments might use
-          const bodyString = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
-          const sortedBodyString = JSON.stringify(req.body, Object.keys(req.body).sort());
-          const cleanBodyString = JSON.stringify(req.body);
-          
-          // Method 1: Use raw body as received
-          const sig1 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(bodyString).digest('hex');
-          
-          // Method 2: Use sorted JSON keys
-          const sig2 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(sortedBodyString).digest('hex');
-          
-          // Method 3: Use clean JSON without extra whitespace
-          const sig3 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(cleanBodyString).digest('hex');
-          
-          // Method 4: Try with base64 encoding
-          const sig4 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(bodyString).digest('base64');
-          
-          signatureIsValid = signature === sig1 || signature === sig2 || signature === sig3 || signature === sig4;
-          
-          logger.info('Signature verification:', {
-            received: signature,
-            method1_hex: sig1,
-            method2_sorted: sig2,
-            method3_clean: sig3,
-            method4_base64: sig4,
-            isValid: signatureIsValid,
-            rawBodyLength: req.rawBody ? req.rawBody.length : 0,
-            secretLength: NOWPAYMENTS_IPN_SECRET.length,
-            isProduction
-          });
-          
-          if (!signatureIsValid) {
-            if (isProduction) {
-              logger.error('🚫 Invalid webhook signature - rejecting payment in production mode');
-              paymentProcessingTracker.releaseLock(paymentId);
-              return res.status(403).json({ 
-                error: 'Invalid signature',
-                message: 'Webhook signature verification failed. Payment rejected for security.'
-              });
-            } else {
-              logger.warn('⚠️ Invalid webhook signature - allowing in development mode (set NODE_ENV=production for strict validation)');
-            }
-          } else {
-            logger.info('✅ Webhook signature verified successfully');
-          }
-          
-        } catch (err) {
-          logger.error('Error during signature verification:', err);
-          if (isProduction) {
-            paymentProcessingTracker.releaseLock(paymentId);
-            return res.status(500).json({ 
-              error: 'Signature verification failed',
-              message: 'Unable to verify webhook authenticity'
-            });
-          } else {
-            logger.warn('Signature verification error in development - continuing anyway');
-          }
-        }
-      } else {
-        const missingComponents = [];
-        if (!signature) missingComponents.push('x-nowpayments-sig header');
-        if (!NOWPAYMENTS_IPN_SECRET || NOWPAYMENTS_IPN_SECRET === 'your_ipn_secret_here') {
-          missingComponents.push('IPN secret configuration');
-        }
-        
-        if (isProduction && missingComponents.length > 0) {
-          logger.error(`🚫 Missing required webhook security components in production: ${missingComponents.join(', ')}`);
-          paymentProcessingTracker.releaseLock(paymentId);
-          return res.status(400).json({ 
-            error: 'Missing webhook verification data',
-            message: 'Required security headers or configuration missing',
-            missing: missingComponents
-          });
-        } else {
-          logger.warn(`⚠️ Missing webhook security components (${missingComponents.join(', ')}) - allowing in development mode`);
-        }
+      // Set balance directly to avoid double crediting issues
+      user.balance = previousBalance + amount;
+      
+      // Add to unwagered amount for wagering requirements (track total deposits that need wagering)
+      if (!user.unwageredAmount) {
+        user.unwageredAmount = 0;
       }
-
-      // DOUBLE CHECK: Database-level duplicate prevention with atomic operation
-      // This is our final safety net against race conditions
-      const user = await User.findOneAndUpdate(
-        { 
-          _id: userId,
-          'processedPayments.paymentId': { $ne: paymentId } // Only update if payment not already processed
-        },
-        {
-          $addToSet: {
-            processedPayments: {
-              paymentId,
-              orderKey: `${order_id}_${payment_status}_${paymentId}`,
-              status: payment_status,
-              amount: parseFloat(price_amount),
-              createdAt: new Date(),
-              processingTime: Date.now() - startTime
+      user.unwageredAmount += amount;
+      
+      // Initialize wagering tracking if needed
+      if (!user.wageringProgress) {
+        user.wageringProgress = {
+          totalDeposited: 0,
+          totalWageredSinceDeposit: 0
+        };
+      }
+      
+      // Track this deposit
+      user.wageringProgress.totalDeposited += amount;
+      
+      logger.info(`Processing deposit for user ${userId}: $${amount} (${previousBalance} -> ${user.balance}, unwagered: ${user.unwageredAmount})`);
+      
+      // Update deposit status
+      if (req.body.invoice_id) {
+        await User.findOneAndUpdate(
+          { _id: userId, "depositRequests.depositId": req.body.invoice_id },
+          { 
+            $set: { 
+              "depositRequests.$.status": "completed"
             }
           }
-        },
-        { new: true } // Return updated document
-      );
+        );
+      }
+      
+      await user.save();
+      logger.info(`User balance saved: ${user.balance}`);
 
-      // If user is null, it means either user doesn't exist OR payment was already processed
-      if (!user) {
-        // Check if user exists but payment was already processed
-        const existingUser = await User.findById(userId);
-        if (existingUser) {
-          const alreadyProcessed = existingUser.processedPayments.some(p => p.paymentId === paymentId);
-          if (alreadyProcessed) {
-            logger.warn(`💀 Payment ${paymentId} already processed in database for user ${userId}`);
-            paymentProcessingTracker.markProcessed(paymentId);
-            return res.status(200).json({ message: 'Payment already processed' });
-          }
-        }
-        logger.error('User not found for deposit:', userId);
-        paymentProcessingTracker.releaseLock(paymentId);
-        return res.status(404).json({ error: 'User not found' });
+      // Create a transaction record using recordWager helper to ensure proper validation
+      try {
+        const transaction = await recordWager(userId, 'manual', amount, {
+          type: 'deposit',
+          paymentId,
+          processed: true,
+          paymentDetails: req.body
+        });
+        
+        // Update the wager to reflect it as a deposit (win outcome, profit = amount)
+        await updateWagerOutcome(transaction._id, 'win', amount);
+        
+        logger.info(`Transaction record created: ${transaction._id}`);
+      } catch (wagerError) {
+        logger.error('Failed to create transaction record:', wagerError);
+        // Continue processing even if transaction record fails
       }
 
-      // TRIPLE CHECK: Backup check in Wager records
-      const existingWager = await Wager.findOne({ 
-        'meta.paymentId': paymentId,
-        'meta.processed': true 
+      // Notify frontend in real-time
+      const notificationData = {
+        newBalance: user.balance,
+        amount: amount,
+        transaction: {
+          id: paymentId,
+          type: 'deposit',
+          amount,
+          timestamp: new Date()
+        }
+      };
+      
+      logger.info(`Sending balance update notification to user-${userId}:`, notificationData);
+      io.to(`user-${userId}`).emit('balance_update', notificationData);
+
+      // Mark this payment as processed in memory as backup (but main check is database)
+      const processedKey = `${order_id}_${payment_status}_${paymentId}`;
+      const timestamp = new Date();
+      transactions.set(processedKey, {
+        timestamp,
+        userId,
+        amount,
+        paymentId
       });
       
-      if (existingWager) {
-        logger.warn(`💀 Payment ${paymentId} already processed (found in Wager records)`);
-        paymentProcessingTracker.markProcessed(paymentId);
-        return res.status(200).json({ message: 'Payment already processed' });
-      }
-      
-      if (payment_status === 'finished' || payment_status === 'confirmed') {
-        // Process the successful payment
-        const amount = parseFloat(price_amount);
-        const previousBalance = user.balance;
-        
-        // ATOMIC BALANCE UPDATE: Set balance directly to avoid double crediting issues
-        user.balance = previousBalance + amount;
-        
-        // Add to unwagered amount for wagering requirements (track total deposits that need wagering)
-        if (!user.unwageredAmount) {
-          user.unwageredAmount = 0;
-        }
-        user.unwageredAmount += amount;
-        
-        // Initialize wagering tracking if needed
-        if (!user.wageringProgress) {
-          user.wageringProgress = {
-            totalDeposited: 0,
-            totalWageredSinceDeposit: 0
-          };
-        }
-        
-        // Track this deposit
-        user.wageringProgress.totalDeposited += amount;
-        
-        logger.info(`✅ Processing deposit for user ${userId}: $${amount} (${previousBalance} -> ${user.balance}, unwagered: ${user.unwageredAmount})`);
-        
-        // Update deposit status if we have invoice_id
-        if (invoice_id) {
-          await User.findOneAndUpdate(
-            { _id: userId, "depositRequests.depositId": invoice_id },
-            { 
-              $set: { 
-                "depositRequests.$.status": "completed"
-              }
-            }
-          );
-        }
-        
-        // Save user with all updates
-        await user.save();
-        logger.info(`✅ User balance saved: ${user.balance}`);
-
-        // Create a transaction record using recordWager helper
-        try {
-          const transaction = await recordWager(userId, 'manual', amount, {
-            type: 'deposit',
-            paymentId,
-            processed: true,
-            paymentDetails: req.body,
-            processingTime: Date.now() - startTime
-          });
-          
-          // Update the wager to reflect it as a deposit (win outcome, profit = amount)
-          await updateWagerOutcome(transaction._id, 'win', amount);
-          
-          logger.info(`✅ Transaction record created: ${transaction._id}`);
-        } catch (wagerError) {
-          logger.error('Failed to create transaction record:', wagerError);
-          // Continue processing even if transaction record fails
-        }
-
-        // Mark payment as fully processed BEFORE notifications
-        paymentProcessingTracker.markProcessed(paymentId);
-
-        // Notify frontend in real-time
-        const notificationData = {
-          newBalance: user.balance,
-          amount: amount,
-          transaction: {
-            id: paymentId,
-            type: 'deposit',
-            amount,
-            timestamp: new Date()
-          }
-        };
-        
-        logger.info(`📡 Sending balance update notification to user-${userId}:`, notificationData);
-        io.to(`user-${userId}`).emit('balance_update', notificationData);
-
-        logger.info(`💰 Deposit success: User ${userId} +$${amount} (Payment ID: ${paymentId}) - Processing time: ${Date.now() - startTime}ms`);
-        return res.status(200).json({ success: true });
+      // Clean up old transactions from memory (keep only last 1000)
+      if (transactions.size > 1000) {
+        const entries = Array.from(transactions.entries());
+        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+        entries.slice(0, 500).forEach(([key]) => transactions.delete(key));
       }
 
-      // For other payment statuses, just log and acknowledge without processing
-      logger.info(`📝 Payment status update: ${payment_status} for ${order_id} (Payment ID: ${paymentId})`);
-      paymentProcessingTracker.releaseLock(paymentId); // Release lock since we're not processing
-      res.status(200).json({ received: true });
-      
-    } catch (processingError) {
-      // Release lock on any processing error
-      paymentProcessingTracker.releaseLock(paymentId);
-      throw processingError;
+      logger.info(`💰 Deposit success: User ${userId} +$${amount} (Payment ID: ${paymentId})`);
+      return res.status(200).json({ success: true });
     }
-    
+
+    // For other payment statuses, just log and acknowledge
+    logger.info(`Payment status update: ${payment_status} for ${order_id}`);
+    res.status(200).json({ received: true });
   } catch (err) {
-    logger.error('💥 Webhook processing error:', err);
+    logger.error('Webhook processing error:', err);
     return res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Rest of your endpoints continue here...
 // Mock payment webhook for testing
 app.post('/api/payment/webhook-test', authMiddleware, async (req, res) => {
   const { amount, userId } = req.body;
@@ -2425,6 +2606,852 @@ app.post('/api/payment/webhook-test', authMiddleware, async (req, res) => {
   }
 });
 
+// Add balance manually
+app.post('/api/user/add-balance', authMiddleware, async (req, res) => {
+  const { amount } = req.body;
+
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Generate transaction ID
+    const transactionId = generateTransactionId();
+    
+    // Verify not a duplicate transaction
+    if (!verifyTransaction(transactionId, req.userId, amount, 'add_balance')) {
+      return res.status(429).json({ error: 'Duplicate balance update. Please wait before trying again.' });
+    }
+
+    user.balance += amount;
+    await user.save();
+
+    // Create a transaction record
+    const transaction = new Wager({
+      userId: req.userId,
+      amount,
+      gameType: 'deposit',
+      outcome: 'win',
+      profit: amount
+    });
+    
+    await transaction.save();
+
+    logger.info(`Manual balance update: User ${req.userId} +$${amount}`);
+    res.json({ 
+      message: 'Balance updated successfully', 
+      balance: user.balance,
+      transaction: {
+        id: transaction._id,
+        amount,
+        timestamp: new Date()
+      }
+    });
+  } catch (err) {
+    logger.error('Add balance error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Withdraw endpoint (enhanced)
+app.post('/api/payment/withdraw', authMiddleware, async (req, res) => {
+  const { amount, currency, address } = req.body;
+  
+  if (!amount || !currency || !address) {
+    return res.status(400).json({ error: 'Amount, currency and address are required' });
+  }
+
+  // Validate amount
+  if (amount < 50) {
+    return res.status(400).json({ error: 'Minimum withdrawal amount is $50' });
+  }
+
+  // Validate currency
+  const allowedCurrencies = ['BTC', 'ETH', 'USDT', 'LTC'];
+  if (!allowedCurrencies.includes(currency)) {
+    return res.status(400).json({ error: 'Unsupported currency' });
+  }
+
+  // Validate address format based on currency
+  let validAddress = false;
+  
+  if (currency === 'BTC') {
+    // Basic Bitcoin address validation
+    validAddress = /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/.test(address);
+  } else if (currency === 'ETH') {
+    // Basic Ethereum address validation
+    validAddress = /^0x[a-fA-F0-9]{40}$/.test(address);
+  } else if (currency === 'LTC') {
+    // Basic Litecoin address validation
+    validAddress = /^[LM3][a-km-zA-HJ-NP-Z1-9]{26,33}$/.test(address);
+  } else if (currency === 'USDT') {
+    // USDT can be on multiple chains, accept Ethereum format
+    validAddress = /^0x[a-fA-F0-9]{40}$/.test(address);
+  }
+  
+  if (!validAddress) {
+    return res.status(400).json({ error: `Invalid ${currency} address format` });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check for KYC verification if required
+    if (amount > 1000 && !user.kycVerified) {
+      return res.status(403).json({ error: 'KYC verification required for withdrawals over $1000' });
+    }
+
+    // Check for unwagered deposits
+    if (!user.unwageredAmount) {
+      user.unwageredAmount = 0;
+    }
+    
+    if (user.unwageredAmount > 0) {
+      return res.status(403).json({
+        error: 'Wagering requirement not met',
+        details: {
+          unwageredAmount: user.unwageredAmount,
+          message: `You must wager $${user.unwageredAmount.toFixed(2)} before withdrawing`,
+          requirement: `${WAGER_REQUIREMENT_MULTIPLIER}x deposit amount`
+        }
+      });
+    }
+    
+    // Legacy check (remove in future versions)
+    if (user.totalWagered < amount * 1.5) {
+      return res.status(403).json({ 
+        error: 'Wagering requirement not met',
+        details: {
+          totalWagered: user.totalWagered,
+          required: amount * 1.5,
+          remaining: amount * 1.5 - user.totalWagered
+        }
+      });
+    }
+
+    if (user.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+
+    // Generate transaction ID
+    const transactionId = generateTransactionId();
+    
+    // Verify not a duplicate transaction
+    if (!verifyTransaction(transactionId, req.userId, amount, 'withdraw')) {
+      return res.status(429).json({ error: 'Duplicate withdrawal request. Please wait before trying again.' });
+    }
+    
+    // Get crypto price for informational purposes
+    const prices = await fetchCryptoPrices();
+    const cryptoAmount = calculateCryptoAmount(amount, prices[currency]?.price || 0);
+
+    // Deduct user balance
+    user.balance -= amount;
+    
+    // Add to withdrawal history
+    user.withdrawals = user.withdrawals || [];
+    user.withdrawals.push({
+      amount,
+      currency,
+      cryptoAmount,
+      address,
+      status: 'pending',
+      timestamp: new Date(),
+      transactionId
+    });
+    
+    await user.save();
+
+    // Create a transaction record
+    const transaction = new Wager({
+      userId: req.userId,
+      amount,
+      gameType: 'withdrawal',
+      outcome: 'loss',
+      profit: -amount,
+      meta: {
+        currency,
+        cryptoAmount,
+        address,
+        status: 'pending',
+        transactionId
+      }
+    });
+    
+    await transaction.save();
+
+    // Send notification to Discord
+    const discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
+    if (discordWebhookUrl) {
+      const embed = {
+        title: 'New Withdrawal Request',
+        color: 0xff0000,
+        fields: [
+          { name: 'User', value: user.username, inline: true },
+          { name: 'Amount', value: `$${amount}`, inline: true },
+          { name: 'Currency', value: currency, inline: true },
+          { name: 'Crypto Amount', value: `${cryptoAmount} ${currency}`, inline: true },
+          { name: 'Address', value: address },
+          { name: 'Transaction ID', value: transactionId },
+          { name: 'Timestamp', value: new Date().toISOString() }
+        ],
+      };
+
+      try {
+        await axios.post(discordWebhookUrl, { embeds: [embed] });
+      } catch (error) {
+        logger.error('Discord webhook error:', error);
+        // Continue even if Discord notification fails
+      }
+    }
+
+    logger.info(`Withdrawal request: User ${user.username} $${amount} (${cryptoAmount} ${currency}) to ${address}`);
+    res.json({ 
+      message: 'Withdrawal request submitted successfully',
+      transactionId,
+      cryptoAmount,
+      estimatedTime: '24-48 hours'
+    });
+  } catch (err) {
+    logger.error('Withdrawal error:', err);
+    res.status(500).json({ error: 'Failed to process withdrawal' });
+  }
+});
+
+// Tip endpoint (enhanced)
+app.post('/api/user/tip', authMiddleware, async (req, res) => {
+  const { recipientUsername, amount } = req.body;
+
+  if (!recipientUsername || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'Recipient and positive amount are required' });
+  }
+
+  // Maximum tip amount
+  if (amount > 1000) {
+    return res.status(400).json({ error: 'Maximum tip amount is $1000' });
+  }
+
+  try {
+    const sender = await User.findById(req.userId);
+    if (!sender) return res.status(404).json({ error: 'Sender not found' });
+
+    if (sender.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+
+    const recipient = await User.findOne({ username: recipientUsername });
+    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+
+    // Prevent self-tipping
+    if (sender._id.toString() === recipient._id.toString()) {
+      return res.status(400).json({ error: 'You cannot tip yourself' });
+    }
+
+    // Generate transaction ID
+    const transactionId = generateTransactionId();
+    
+    // Verify not a duplicate transaction
+    if (!verifyTransaction(transactionId, req.userId, amount, 'tip')) {
+      return res.status(429).json({ error: 'Duplicate tip request. Please wait before trying again.' });
+    }
+
+    sender.balance -= amount;
+    recipient.balance += amount;
+
+    // Track tip in sender and recipient history
+    sender.tipsSent = sender.tipsSent || [];
+    sender.tipsSent.push({
+      amount,
+      recipient: recipient.username,
+      timestamp: new Date(),
+      transactionId
+    });
+
+    recipient.tipsReceived = recipient.tipsReceived || [];
+    recipient.tipsReceived.push({
+      amount,
+      sender: sender.username,
+      timestamp: new Date(),
+      transactionId
+    });
+
+    await sender.save();
+    await recipient.save();
+
+    // Notify recipient in real-time
+    io.to(`user-${recipient._id}`).emit('new_tip', {
+      amount,
+      sender: sender.username,
+      timestamp: new Date(),
+      newBalance: recipient.balance
+    });
+
+    logger.info(`Tip: ${sender.username} -> ${recipient.username}: $${amount}`);
+    res.json({ 
+      message: `Successfully tipped $${amount} to ${recipientUsername}`,
+      newBalance: sender.balance
+    });
+  } catch (err) {
+    logger.error('Tip error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Coinflip game endpoint
+app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
+  const { amount, choice } = req.body;
+  if (!amount || amount <= 0 || !['heads', 'tails'].includes(choice)) {
+    return res.status(400).json({ error: 'Invalid bet' });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+
+    // Generate transaction ID
+    const transactionId = generateTransactionId();
+    
+    // Verify not a duplicate transaction
+    if (!verifyTransaction(transactionId, req.userId, amount, 'coinflip')) {
+      return res.status(429).json({ error: 'Duplicate bet. Please wait before trying again.' });
+    }
+
+    // Record the wager
+    const wager = await recordWager(req.userId, 'coinflip', amount);
+    
+    // Track wager in user stats and reduce unwagered amount
+    // Process unwagered amount for wagering requirements
+    if (user.unwageredAmount === undefined) {
+      user.unwageredAmount = 0;
+    }
+    
+    // Track wagering progress for requirements
+    if (!user.wageringProgress) {
+      user.wageringProgress = {
+        totalDeposited: user.unwageredAmount || 0,
+        totalWageredSinceDeposit: 0
+      };
+    }
+    
+    // Add this wager to total wagered
+    user.wageringProgress.totalWageredSinceDeposit += amount;
+    
+    // Check if wagering requirement is now met
+    const requiredWagering = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
+    if (user.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
+      // Requirement met - reset counters
+      user.unwageredAmount = 0;
+      user.wageringProgress = {
+        totalDeposited: 0,
+        totalWageredSinceDeposit: 0
+      };
+      logger.info(`User ${req.userId} completed wagering requirements! Total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, Required: $${requiredWagering}`);
+    } else {
+      // Still have requirements to meet
+      const remaining = requiredWagering - user.wageringProgress.totalWageredSinceDeposit;
+      user.unwageredAmount = remaining;
+      logger.info(`User ${req.userId} wagered $${amount} in coinflip, total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, still need: $${remaining.toFixed(2)}`);
+    }
+    
+    // Track wager stats
+    user.totalWagered = (user.totalWagered || 0) + amount;
+    
+    // Update user level based on new total wagering
+    updateUserLevel(user);
+    
+    // Initialize game stats
+    if (!user.gameStats) {
+      user.gameStats = new Map();
+    }
+    
+    if (!user.gameStats.has('coinflip')) {
+      user.gameStats.set('coinflip', {
+        totalWagered: 0,
+        totalGames: 0,
+        wins: 0,
+        losses: 0
+      });
+    }
+    
+    const gameStats = user.gameStats.get('coinflip');
+    gameStats.totalWagered += amount;
+    gameStats.totalGames += 1;
+    user.gameStats.set('coinflip', gameStats);
+
+    // Generate provably fair result
+    const serverSeed = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.createHash('sha256').update(serverSeed).digest('hex');
+    
+    const outcome = parseInt(hash.slice(0, 8), 16) % 100 < 46 ? 'heads' : 'tails';
+    const win = outcome === choice;
+    
+    let profit = 0;
+    if (win) {
+      profit = amount;
+      user.balance += amount;
+    } else {
+      profit = -amount;
+      user.balance -= amount;
+    }
+
+    // Record game outcome
+    await user.recordGameOutcome(win, Math.abs(profit));
+    await user.save();
+    
+    // Update wager outcome
+    await updateWagerOutcome(wager._id, win ? 'win' : 'loss', profit);
+
+    // Track high win
+    if (win && amount >= 100) {
+      io.emit('high_win', {
+        username: user.username,
+        game: 'coinflip',
+        profit: amount,
+        choice,
+        outcome
+      });
+    }
+
+    logger.info(`Coinflip: ${user.username} bet $${amount} on ${choice}, outcome: ${outcome}, ${win ? 'win' : 'loss'}`);
+    res.json({
+      outcome,
+      win,
+      newBalance: user.balance,
+      serverSeed,
+      hash,
+    });
+  } catch (err) {
+    logger.error('Coinflip error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// User stats endpoint
+app.get('/api/user/stats', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    // Make sure user level is updated
+    updateUserLevel(user);
+    await user.save();
+    
+    // Get user's wagering stats
+    const wagerStats = await Wager.aggregate([
+      { $match: { userId: mongoose.Types.ObjectId(req.userId) } },
+      { $group: {
+          _id: "$gameType",
+          totalWagered: { $sum: "$amount" },
+          totalGames: { $sum: 1 },
+          wins: { $sum: { $cond: [{ $eq: ["$outcome", "win"] }, 1, 0] } },
+          losses: { $sum: { $cond: [{ $eq: ["$outcome", "loss"] }, 1, 0] } }
+        }
+      }
+    ]);
+    
+    // Get referral stats
+    const referralStats = await user.getReferralStats();
+    
+    // Calculate win rate
+    const winRate = user.gamesPlayed > 0 ? (user.gamesWon / user.gamesPlayed) * 100 : 0;
+    
+    // Get user's current level info
+    const currentLevelIndex = user.level?.current ? Math.min(user.level.current - 1, USER_LEVELS.length - 1) : 0;
+    const currentLevel = USER_LEVELS[currentLevelIndex];
+    
+    // Get next level info if not at max level
+    const nextLevelIndex = currentLevelIndex < USER_LEVELS.length - 1 ? currentLevelIndex + 1 : currentLevelIndex;
+    const nextLevel = USER_LEVELS[nextLevelIndex];
+    const isMaxLevel = currentLevelIndex === USER_LEVELS.length - 1;
+    
+    res.json({
+      username: user.username,
+      displayName: user.displayName || user.username,
+      avatar: user.avatar,
+      level: {
+        current: user.level?.current || 1,
+        name: currentLevel.name,
+        color: currentLevel.color,
+        progress: user.level?.progress || 0,
+        nextLevel: isMaxLevel ? null : nextLevel.level,
+        nextLevelName: isMaxLevel ? null : nextLevel.name,
+        requiredWagering: currentLevel.requiredWagering,
+        nextLevelRequiredWagering: isMaxLevel ? null : nextLevel.requiredWagering,
+        totalWagered: user.totalWagered || 0,
+        rewards: currentLevel.rewards
+      },
+      balance: user.balance,
+      referralCode: user.referralCode,
+      referralLink: user.getReferralLink(),
+      totalWagered: user.totalWagered,
+      referralEarnings: user.referralEarnings,
+      referralCount: user.referralCount,
+      gamesPlayed: user.gamesPlayed,
+      gamesWon: user.gamesWon,
+      gamesLost: user.gamesLost,
+      winRate: winRate.toFixed(2),
+      totalProfit: user.totalProfit,
+      highestWin: user.highestWin,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLoginTime,
+      referralStats,
+      gameStats: wagerStats.reduce((acc, game) => {
+        acc[game._id] = {
+          totalWagered: game.totalWagered,
+          totalGames: game.totalGames,
+          wins: game.wins,
+          losses: game.losses,
+          winRate: game.totalGames > 0 ? (game.wins / game.totalGames * 100).toFixed(2) : '0.00'
+        };
+        return acc;
+      }, {})
+    });
+  } catch (err) {
+    logger.error('Error getting user stats:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get detailed user level info
+app.get('/api/user/level', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    // Make sure user level is updated
+    updateUserLevel(user);
+    await user.save();
+    
+    // Return all levels with current user position
+    res.json({
+      userLevel: user.level || { current: 1, progress: 0, totalWagered: 0 },
+      levels: USER_LEVELS,
+      totalWagered: user.totalWagered || 0
+    });
+  } catch (err) {
+    logger.error('Get user level error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get leaderboard
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    const { type = 'wagered', timeframe = 'all' } = req.query;
+    
+    let filter = {};
+    if (timeframe === 'day') {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      filter = { createdAt: { $gte: yesterday } };
+    } else if (timeframe === 'week') {
+      const lastWeek = new Date();
+      lastWeek.setDate(lastWeek.getDate() - 7);
+      filter = { createdAt: { $gte: lastWeek } };
+    } else if (timeframe === 'month') {
+      const lastMonth = new Date();
+      lastMonth.setMonth(lastMonth.getMonth() - 1);
+      filter = { createdAt: { $gte: lastMonth } };
+    }
+    
+    let sort = {};
+    if (type === 'wagered') {
+      sort = { totalWagered: -1 };
+    } else if (type === 'profit') {
+      sort = { totalProfit: -1 };
+    } else if (type === 'wins') {
+      sort = { gamesWon: -1 };
+    }
+    
+    const users = await User.find(filter)
+      .select('username displayName avatar totalWagered totalProfit gamesWon gamesPlayed highestWin')
+      .sort(sort)
+      .limit(50);
+    
+    res.json(users.map(user => ({
+      username: user.username,
+      displayName: user.displayName || user.username,
+      avatar: user.avatar,
+      totalWagered: user.totalWagered,
+      totalProfit: user.totalProfit,
+      gamesWon: user.gamesWon,
+      gamesPlayed: user.gamesPlayed,
+      highestWin: user.highestWin,
+      winRate: user.gamesPlayed > 0 ? ((user.gamesWon / user.gamesPlayed) * 100).toFixed(2) : '0.00'
+    })));
+  } catch (err) {
+    logger.error('Leaderboard error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin endpoints for wagering settings
+app.post('/api/admin/wagering/settings', authMiddleware, adminMiddleware, async (req, res) => {
+  const { multiplier } = req.body;
+  
+  if (multiplier === undefined || isNaN(multiplier) || multiplier < 0) {
+    return res.status(400).json({ error: 'Invalid multiplier value' });
+  }
+  
+  // Update the global multiplier
+  const oldMultiplier = WAGER_REQUIREMENT_MULTIPLIER;
+  WAGER_REQUIREMENT_MULTIPLIER = parseFloat(multiplier);
+  
+  logger.info(`Admin ${req.userId} updated wagering requirement multiplier from ${oldMultiplier}x to ${WAGER_REQUIREMENT_MULTIPLIER}x`);
+  
+  return res.json({
+    success: true,
+    oldMultiplier,
+    newMultiplier: WAGER_REQUIREMENT_MULTIPLIER,
+    message: `Wagering requirement updated to ${WAGER_REQUIREMENT_MULTIPLIER}x`
+  });
+});
+
+app.get('/api/admin/wagering/settings', authMiddleware, adminMiddleware, async (req, res) => {
+  return res.json({
+    multiplier: WAGER_REQUIREMENT_MULTIPLIER
+  });
+});
+
+// Reset a user's wagering requirements (for special cases or VIPs)
+app.post('/api/admin/user/:userId/reset-wagering', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const previousAmount = user.unwageredAmount || 0;
+    user.unwageredAmount = 0;
+    await user.save();
+    
+    logger.info(`Admin ${req.userId} reset wagering requirements for user ${userId} (was: $${previousAmount})`);
+    
+    return res.json({
+      success: true,
+      userId,
+      previousAmount,
+      currentAmount: 0,
+      message: `Wagering requirements reset for user ${userId}`
+    });
+  } catch (err) {
+    logger.error('Error resetting user wagering:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// User list with wagering info
+app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, search, sortBy = 'createdAt', sortOrder = -1 } = req.query;
+    
+    let query = {};
+    if (search) {
+      query = { username: { $regex: search, $options: 'i' } };
+    }
+    
+    // Add filter for users with wagering requirements
+    if (req.query.hasWageringRequirements === 'true') {
+      query.unwageredAmount = { $gt: 0 };
+    } else if (req.query.hasWageringRequirements === 'false') {
+      query.unwageredAmount = { $lte: 0 };
+    }
+    
+    // Sort options
+    const sortOptions = {};
+    sortOptions[sortBy] = parseInt(sortOrder);
+    
+    const users = await User.find(query)
+      .select('-passwordHash')
+      .sort(sortOptions)
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+    
+    const total = await User.countDocuments(query);
+    
+    // Enhance user objects with wagering status
+    const enhancedUsers = users.map(user => {
+      const userObj = user.toObject();
+      
+      // Ensure unwageredAmount is defined
+      if (userObj.unwageredAmount === undefined) {
+        userObj.unwageredAmount = 0;
+      }
+      
+      // Add wagering status
+      userObj.wageringStatus = {
+        hasRequirements: userObj.unwageredAmount > 0,
+        unwageredAmount: userObj.unwageredAmount || 0,
+        canWithdraw: (userObj.unwageredAmount || 0) <= 0
+      };
+      
+      return userObj;
+    });
+    
+    res.json({
+      users: enhancedUsers,
+      totalPages: Math.ceil(total / limit),
+      currentPage: parseInt(page),
+      wageringSettings: {
+        multiplier: WAGER_REQUIREMENT_MULTIPLIER
+      }
+    });
+  } catch (err) {
+    logger.error('Admin users error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin endpoint to manage processed payments cache
+app.post('/api/admin/payment-cache', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { action } = req.body;
+    
+    if (action === 'clear') {
+      // Clear in-memory payment cache
+      const oldSize = transactions.size;
+      transactions.clear();
+      
+      logger.info(`🧹 Admin cleared payment cache (${oldSize} entries removed)`);
+      return res.json({ 
+        success: true, 
+        message: `Payment cache cleared (${oldSize} entries removed)`,
+        previousSize: oldSize,
+        currentSize: 0
+      });
+    } else if (action === 'stats') {
+      // Return stats about the cache
+      return res.json({
+        size: transactions.size,
+        oldestEntry: transactions.size > 0 ? 
+          Array.from(transactions.values()).sort((a, b) => a.timestamp - b.timestamp)[0] : 
+          null,
+        newestEntry: transactions.size > 0 ?
+          Array.from(transactions.values()).sort((a, b) => b.timestamp - a.timestamp)[0] :
+          null
+      });
+    } else if (action === 'persist') {
+      // Persist all in-memory entries to database
+      let savedCount = 0;
+      let errorCount = 0;
+      
+      for (const [key, entry] of transactions.entries()) {
+        try {
+          // Find the user and add payment to their processedPayments array
+          await User.findByIdAndUpdate(entry.userId, {
+            $addToSet: {
+              processedPayments: {
+                paymentId: entry.paymentId,
+                orderKey: key,
+                status: key.split('_')[2] || 'unknown',
+                amount: entry.amount,
+                createdAt: entry.timestamp
+              }
+            }
+          });
+          savedCount++;
+        } catch (err) {
+          errorCount++;
+          logger.error(`Failed to persist payment ${key}:`, err);
+        }
+      }
+      
+      return res.json({
+        success: true,
+        savedCount,
+        errorCount,
+        totalProcessed: savedCount + errorCount
+      });
+    }
+    
+    return res.status(400).json({ error: 'Invalid action. Use "clear", "stats", or "persist"' });
+  } catch (err) {
+    logger.error('Payment cache admin error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/admin/user/:userId/update', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { balance, isAdmin, unwageredAmount } = req.body;
+    
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    if (balance !== undefined) user.balance = balance;
+    if (isAdmin !== undefined) user.isAdmin = isAdmin;
+    
+    // Add support for wagering requirement adjustment
+    if (unwageredAmount !== undefined) {
+      user.unwageredAmount = unwageredAmount;
+      logger.info(`Admin ${req.userId} set unwagered amount for user ${userId} to $${unwageredAmount}`);
+    }
+    
+    await user.save();
+    
+    logger.info(`Admin update: User ${userId} updated by ${req.username || req.userId}`);
+    res.json({ 
+      message: 'User updated successfully',
+      user: {
+        id: user._id,
+        username: user.username,
+        balance: user.balance,
+        isAdmin: user.isAdmin,
+        unwageredAmount: user.unwageredAmount || 0
+      }
+    });
+  } catch (err) {
+    logger.error('Admin update user error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin security dashboard
+app.get('/api/admin/security', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    res.json({
+      blockedIPs: Array.from(securityEvents.blockedIPs),
+      suspiciousActivities: securityEvents.suspiciousActivities.slice(-100), // Last 100 events
+      loginAttempts: Array.from(securityEvents.loginAttempts).map(([ip, attempts]) => ({ 
+        ip, 
+        attempts: attempts.slice(-10) // Last 10 attempts
+      }))
+    });
+  } catch (err) {
+    logger.error('Admin security error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin block/unblock IP
+app.post('/api/admin/security/block-ip', authMiddleware, adminMiddleware, async (req, res) => {
+  const { ip, action } = req.body;
+  
+  if (!ip) {
+    return res.status(400).json({ error: 'IP address is required' });
+  }
+  
+  if (action === 'block') {
+    securityEvents.blockedIPs.add(ip);
+    logger.info(`Admin blocked IP: ${ip}`);
+  } else if (action === 'unblock') {
+    securityEvents.blockedIPs.delete(ip);
+    logger.info(`Admin unblocked IP: ${ip}`);
+  } else {
+    return res.status(400).json({ error: 'Invalid action' });
+  }
+  
+  res.json({ success: true, action, ip });
+});
+
 // Referral routes
 app.use('/api/referral', referralRouter);
 
@@ -2445,3 +3472,4 @@ const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   logger.info(`🚀 Server running on port ${PORT}`);
 });
+module.exports
