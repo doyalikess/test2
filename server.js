@@ -2312,7 +2312,7 @@ app.post('/api/payment/deposit-test', authMiddleware, async (req, res) => {
   }
 });
 
-// 🔧 FIXED WEBHOOK HANDLER - BULLETPROOF DUPLICATE PREVENTION
+// Fixed webhook handler with better duplicate prevention
 app.post('/api/payment/webhook', async (req, res) => {
   try {
     // Log the raw webhook
@@ -2327,13 +2327,21 @@ app.post('/api/payment/webhook', async (req, res) => {
       let signatureIsValid = false;
       
       try {
+        // Try different signature calculation methods that NOWPayments might use
         const bodyString = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
         const sortedBodyString = JSON.stringify(req.body, Object.keys(req.body).sort());
         const cleanBodyString = JSON.stringify(req.body);
         
+        // Method 1: Use raw body as received
         const sig1 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(bodyString).digest('hex');
+        
+        // Method 2: Use sorted JSON keys
         const sig2 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(sortedBodyString).digest('hex');
+        
+        // Method 3: Use clean JSON without extra whitespace
         const sig3 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(cleanBodyString).digest('hex');
+        
+        // Method 4: Try with base64 encoding
         const sig4 = crypto.createHmac('sha256', NOWPAYMENTS_IPN_SECRET).update(bodyString).digest('base64');
         
         signatureIsValid = signature === sig1 || signature === sig2 || signature === sig3 || signature === sig4;
@@ -2349,199 +2357,6 @@ app.post('/api/payment/webhook', async (req, res) => {
           secretLength: NOWPAYMENTS_IPN_SECRET.length,
           isProduction
         });
-        
-        if (!signatureIsValid) {
-          if (isProduction) {
-            logger.error('🚫 Invalid webhook signature - rejecting payment in production mode');
-            return res.status(403).json({ 
-              error: 'Invalid signature',
-              message: 'Webhook signature verification failed. Payment rejected for security.'
-            });
-          } else {
-            logger.warn('⚠️ Invalid webhook signature - allowing in development mode (set NODE_ENV=production for strict validation)');
-          }
-        } else {
-          logger.info('✅ Webhook signature verified successfully');
-        }
-        
-      } catch (err) {
-        logger.error('Error during signature verification:', err);
-        if (isProduction) {
-          return res.status(500).json({ 
-            error: 'Signature verification failed',
-            message: 'Unable to verify webhook authenticity'
-          });
-        } else {
-          logger.warn('Signature verification error in development - continuing anyway');
-        }
-      }
-    } else {
-      const missingComponents = [];
-      if (!signature) missingComponents.push('x-nowpayments-sig header');
-      if (!NOWPAYMENTS_IPN_SECRET || NOWPAYMENTS_IPN_SECRET === 'your_ipn_secret_here') {
-        missingComponents.push('IPN secret configuration');
-      }
-      
-      if (isProduction && missingComponents.length > 0) {
-        logger.error(`🚫 Missing required webhook security components in production: ${missingComponents.join(', ')}`);
-        return res.status(400).json({ 
-          error: 'Missing webhook verification data',
-          message: 'Required security headers or configuration missing',
-          missing: missingComponents
-        });
-      } else {
-        logger.warn(`⚠️ Missing webhook security components (${missingComponents.join(', ')}) - allowing in development mode`);
-      }
-    }
-
-    const { payment_status, order_id, price_amount } = req.body;
-    
-    if (!order_id || !order_id.startsWith('deposit_')) {
-      logger.warn('Invalid order ID format:', order_id);
-      return res.status(400).json({ error: 'Invalid order ID format' });
-    }
-    
-    // Extract user ID from order_id (format: deposit_userId_timestamp)
-    const userId = order_id.split('_')[1];
-    
-    // Get payment ID - this is the primary key for deduplication
-    const paymentId = req.body.payment_id || req.body.invoice_id;
-    
-    if (!paymentId) {
-      logger.error('No payment_id found in webhook');
-      return res.status(400).json({ error: 'Payment ID required' });
-    }
-
-    // 🛡️ BULLETPROOF DUPLICATE PREVENTION: Use MongoDB's atomic findOneAndUpdate
-    // This operation is atomic - either it succeeds (first time) or fails (already processed)
-    
-    if (payment_status === 'finished' || payment_status === 'confirmed') {
-      const amount = parseFloat(price_amount);
-      
-      // STEP 1: Atomically check if payment was already processed AND add it to the processed list
-      // This single operation prevents any race conditions
-      const updateResult = await User.findOneAndUpdate(
-        { 
-          _id: userId,
-          'processedPayments.paymentId': { $ne: paymentId } // Only proceed if paymentId not already in array
-        },
-        {
-          $inc: { balance: amount }, // Increment balance by amount
-          $addToSet: {
-            processedPayments: {
-              paymentId,
-              orderKey: `${order_id}_${payment_status}_${paymentId}`,
-              status: payment_status,
-              amount: amount,
-              createdAt: new Date()
-            }
-          }
-        },
-        { 
-          new: true, // Return updated document
-          runValidators: true
-        }
-      );
-
-      // If updateResult is null, it means either:
-      // 1. User doesn't exist, OR
-      // 2. Payment was already processed (paymentId already in processedPayments array)
-      if (!updateResult) {
-        // Check which case it is
-        const existingUser = await User.findById(userId);
-        if (!existingUser) {
-          logger.error('User not found for deposit:', userId);
-          return res.status(404).json({ error: 'User not found' });
-        }
-        
-        // User exists, so payment must have been already processed
-        logger.warn(`💰 Duplicate payment blocked: Payment ${paymentId} already processed for user ${userId}`);
-        return res.status(200).json({ message: 'Payment already processed' });
-      }
-
-      // SUCCESS: Payment was processed for the first time
-      const user = updateResult;
-      
-      // STEP 2: Handle wagering requirements
-      // Initialize unwagered amount if not set
-      if (!user.unwageredAmount) {
-        user.unwageredAmount = 0;
-      }
-      user.unwageredAmount += amount;
-      
-      // Initialize wagering tracking if needed
-      if (!user.wageringProgress) {
-        user.wageringProgress = {
-          totalDeposited: 0,
-          totalWageredSinceDeposit: 0
-        };
-      }
-      
-      // Track this deposit
-      user.wageringProgress.totalDeposited += amount;
-      
-      logger.info(`Processing deposit for user ${userId}: $${amount} (${user.balance - amount} -> ${user.balance}, unwagered: ${user.unwageredAmount})`);
-      
-      // Update deposit status if applicable
-      if (req.body.invoice_id) {
-        await User.findOneAndUpdate(
-          { _id: userId, "depositRequests.depositId": req.body.invoice_id },
-          { 
-            $set: { 
-              "depositRequests.$.status": "completed"
-            }
-          }
-        );
-      }
-      
-      await user.save();
-      logger.info(`User balance saved: ${user.balance}`);
-
-      // STEP 3: Create transaction record
-      try {
-        const transaction = await recordWager(userId, 'deposit', amount, {
-          type: 'deposit',
-          paymentId,
-          processed: true,
-          paymentDetails: req.body
-        });
-        
-        // Update the wager to reflect it as a deposit (win outcome, profit = amount)
-        await updateWagerOutcome(transaction._id, 'win', amount);
-        
-        logger.info(`Transaction record created: ${transaction._id}`);
-      } catch (wagerError) {
-        logger.error('Failed to create transaction record:', wagerError);
-        // Continue processing even if transaction record fails
-      }
-
-      // STEP 4: Notify frontend in real-time
-      const notificationData = {
-        newBalance: user.balance,
-        amount: amount,
-        transaction: {
-          id: paymentId,
-          type: 'deposit',
-          amount,
-          timestamp: new Date()
-        }
-      };
-      
-      logger.info(`Sending balance update notification to user-${userId}:`, notificationData);
-      io.to(`user-${userId}`).emit('balance_update', notificationData);
-
-      logger.info(`💰 Deposit success: User ${userId} +$${amount} (Payment ID: ${paymentId})`);
-      return res.status(200).json({ success: true });
-    }
-
-    // For other payment statuses, just log and acknowledge
-    logger.info(`Payment status update: ${payment_status} for ${order_id}`);
-    res.status(200).json({ received: true });
-  } catch (err) {
-    logger.error('Webhook processing error:', err);
-    return res.status(500).json({ error: 'Server error' });
-  }
-});
         
         if (!signatureIsValid) {
           if (isProduction) {
