@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const User = require('./models/user');
 const Wager = require('./models/wager'); // New import for wager model
@@ -2443,15 +2444,14 @@ app.post('/api/payment/webhook', async (req, res) => {
 
     // If user is null, it means either user doesn't exist OR payment was already processed
     if (!user) {
-    if (!user) {
-  // Check if user exists but payment was already processed
-  const existingUser = await User.findById(userId);
-  if (existingUser) {
-    const alreadyProcessed = existingUser.processedPayments.some(p => p.paymentId === paymentId);
-    if (alreadyProcessed) {
-      logger.warn(`✅ Payment ${paymentId} already processed for user ${userId} - skipping duplicate`);
-      return res.status(200).json({ message: 'Payment already processed' });
-    }
+      // Check if user exists but payment was already processed
+      const existingUser = await User.findById(userId);
+      if (existingUser) {
+        const alreadyProcessed = existingUser.processedPayments.some(p => p.paymentId === paymentId);
+        if (alreadyProcessed) {
+          logger.warn(`Payment ${paymentId} already processed for user ${userId}`);
+          return res.status(200).json({ message: 'Payment already processed' });
+        }
       }
       logger.error('User not found for deposit:', userId);
       return res.status(404).json({ error: 'User not found' });
