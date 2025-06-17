@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const User = require('./models/user');
 const Wager = require('./models/wager'); // New import for wager model
@@ -2468,104 +2467,110 @@ app.post('/api/payment/webhook', async (req, res) => {
       return res.status(200).json({ message: 'Payment already processed' });
     }
     
-    if (payment_status !== 'finished' && payment_status !== 'confirmed') {
-  logger.info(`Payment status update: ${payment_status} for ${order_id} - not processing (waiting for finished/confirmed)`);
-  return res.status(200).json({ received: true, message: 'Status noted, awaiting completion' });
-}
-
-// Credit balance - set the balance exactly to previous balance + amount (no double credits)
-const amount = parseFloat(price_amount);
-const previousBalance = user.balance;
-
-// Set balance directly to avoid double crediting issues
-user.balance = previousBalance + amount;
-
-// Add to unwagered amount for wagering requirements (track total deposits that need wagering)
-if (!user.unwageredAmount) {
-  user.unwageredAmount = 0;
-}
-user.unwageredAmount += amount;
-
-// Initialize wagering tracking if needed
-if (!user.wageringProgress) {
-  user.wageringProgress = {
-    totalDeposited: 0,
-    totalWageredSinceDeposit: 0
-  };
-}
-
-// Track this deposit
-user.wageringProgress.totalDeposited += amount;
-
-logger.info(`✅ Processing deposit for user ${userId}: $${amount} (${previousBalance} -> ${user.balance}, unwagered: ${user.unwageredAmount})`);
-
-// Update deposit status
-if (req.body.invoice_id) {
-  await User.findOneAndUpdate(
-    { _id: userId, "depositRequests.depositId": req.body.invoice_id },
-    { 
-      $set: { 
-        "depositRequests.$.status": "completed"
+    if (payment_status === 'finished' || payment_status === 'confirmed') {
+      // Credit balance - set the balance exactly to previous balance + amount (no double credits)
+      const amount = parseFloat(price_amount);
+      const previousBalance = user.balance;
+      
+      // Set balance directly to avoid double crediting issues
+      user.balance = previousBalance + amount;
+      
+      // Add to unwagered amount for wagering requirements (track total deposits that need wagering)
+      if (!user.unwageredAmount) {
+        user.unwageredAmount = 0;
       }
+      user.unwageredAmount += amount;
+      
+      // Initialize wagering tracking if needed
+      if (!user.wageringProgress) {
+        user.wageringProgress = {
+          totalDeposited: 0,
+          totalWageredSinceDeposit: 0
+        };
+      }
+      
+      // Track this deposit
+      user.wageringProgress.totalDeposited += amount;
+      
+      logger.info(`Processing deposit for user ${userId}: $${amount} (${previousBalance} -> ${user.balance}, unwagered: ${user.unwageredAmount})`);
+      
+      // Update deposit status
+      if (req.body.invoice_id) {
+        await User.findOneAndUpdate(
+          { _id: userId, "depositRequests.depositId": req.body.invoice_id },
+          { 
+            $set: { 
+              "depositRequests.$.status": "completed"
+            }
+          }
+        );
+      }
+      
+      await user.save();
+      logger.info(`User balance saved: ${user.balance}`);
+
+      // Create a transaction record using recordWager helper to ensure proper validation
+      try {
+        const transaction = await recordWager(userId, 'manual', amount, {
+          type: 'deposit',
+          paymentId,
+          processed: true,
+          paymentDetails: req.body
+        });
+        
+        // Update the wager to reflect it as a deposit (win outcome, profit = amount)
+        await updateWagerOutcome(transaction._id, 'win', amount);
+        
+        logger.info(`Transaction record created: ${transaction._id}`);
+      } catch (wagerError) {
+        logger.error('Failed to create transaction record:', wagerError);
+        // Continue processing even if transaction record fails
+      }
+
+      // Notify frontend in real-time
+      const notificationData = {
+        newBalance: user.balance,
+        amount: amount,
+        transaction: {
+          id: paymentId,
+          type: 'deposit',
+          amount,
+          timestamp: new Date()
+        }
+      };
+      
+      logger.info(`Sending balance update notification to user-${userId}:`, notificationData);
+      io.to(`user-${userId}`).emit('balance_update', notificationData);
+
+      // Mark this payment as processed in memory as backup (but main check is database)
+      const processedKey = `${order_id}_${payment_status}_${paymentId}`;
+      const timestamp = new Date();
+      transactions.set(processedKey, {
+        timestamp,
+        userId,
+        amount,
+        paymentId
+      });
+      
+      // Clean up old transactions from memory (keep only last 1000)
+      if (transactions.size > 1000) {
+        const entries = Array.from(transactions.entries());
+        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+        entries.slice(0, 500).forEach(([key]) => transactions.delete(key));
+      }
+
+      logger.info(`💰 Deposit success: User ${userId} +$${amount} (Payment ID: ${paymentId})`);
+      return res.status(200).json({ success: true });
     }
-  );
-}
 
-await user.save();
-logger.info(`✅ User balance saved: ${user.balance}`);
-
-// Create a transaction record using recordWager helper to ensure proper validation
-try {
-  const transaction = await recordWager(userId, 'manual', amount, {
-    type: 'deposit',
-    paymentId,
-    processed: true,
-    paymentDetails: req.body
-  });
-  
-  // Update the wager to reflect it as a deposit (win outcome, profit = amount)
-  await updateWagerOutcome(transaction._id, 'win', amount);
-  
-  logger.info(`✅ Transaction record created: ${transaction._id}`);
-} catch (wagerError) {
-  logger.error('Failed to create transaction record:', wagerError);
-  // Continue processing even if transaction record fails
-}
-
-// Notify frontend in real-time
-const notificationData = {
-  newBalance: user.balance,
-  amount: amount,
-  transaction: {
-    id: paymentId,
-    type: 'deposit',
-    amount,
-    timestamp: new Date()
+    // For other payment statuses, just log and acknowledge
+    logger.info(`Payment status update: ${payment_status} for ${order_id}`);
+    res.status(200).json({ received: true });
+  } catch (err) {
+    logger.error('Webhook processing error:', err);
+    return res.status(500).json({ error: 'Server error' });
   }
-};
-
-logger.info(`✅ Sending balance update notification to user-${userId}:`, notificationData);
-io.to(`user-${userId}`).emit('balance_update', notificationData);
-
-// Mark this payment as processed in memory as backup (but main check is database)
-const processedKey = `${order_id}_${payment_status}_${paymentId}`;
-const timestamp = new Date();
-transactions.set(processedKey, {
-  timestamp,
-  userId,
-  amount,
-  paymentId
 });
-
-// Clean up old transactions from memory (keep only last 1000)
-if (transactions.size > 1000) {
-  const entries = Array.from(transactions.entries());
-  entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
-  entries.slice(0, 500).forEach(([key]) => transactions.delete(key));
-}
-
-logger.info(`💰 Deposit success: User ${userId} +$${amount} (Payment ID: ${paymentId})`);
-return res.status(200).json({ success: true });
 
 // Mock payment webhook for testing
 app.post('/api/payment/webhook-test', authMiddleware, async (req, res) => {
