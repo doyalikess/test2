@@ -114,7 +114,66 @@ const cryptoPriceCache = {
 // ENHANCED: Global payment processing tracker with Redis-like behavior
 const paymentProcessingTracker = {
   processing: new Map(), // paymentId -> { timestamp, userId, lockExpiry }
-  processed: new Set(), // Set of successfully processed payment IDs
+  processed: new Set(),  // Set of successfully processed payment IDs
+  confirmed: new Set(),  // ✅ NEW: confirmed payments already credited
+
+  acquireLock: function (paymentId, userId, lockDurationMs) {
+    lockDurationMs = lockDurationMs || 30000; // Fallback for older Node versions
+
+    const now = Date.now();
+
+    if (this.processed.has(paymentId) || this.confirmed.has(paymentId)) {
+      return { acquired: false, reason: 'already_processed' };
+    }
+
+    if (this.processing.has(paymentId)) {
+      const lock = this.processing.get(paymentId);
+      if (lock.lockExpiry > now) {
+        return { acquired: false, reason: 'currently_processing', existingUserId: lock.userId };
+      } else {
+        this.processing.delete(paymentId);
+      }
+    }
+
+    this.processing.set(paymentId, {
+      timestamp: now,
+      userId,
+      lockExpiry: now + lockDurationMs
+    });
+
+    return { acquired: true };
+  },
+
+  markProcessed: function (paymentId) {
+    this.processing.delete(paymentId);
+    this.processed.add(paymentId);
+    this.confirmed.add(paymentId);
+
+    const maxSize = 10000;
+    if (this.processed.size > maxSize) {
+      const entries = Array.from(this.processed);
+      this.processed = new Set(entries.slice(-maxSize / 2));
+    }
+    if (this.confirmed.size > maxSize) {
+      const entries = Array.from(this.confirmed);
+      this.confirmed = new Set(entries.slice(-maxSize / 2));
+    }
+  },
+
+  releaseLock: function (paymentId) {
+    this.processing.delete(paymentId);
+  },
+
+  cleanup: function () {
+    const now = Date.now();
+    for (const [paymentId, lock] of this.processing.entries()) {
+      if (lock.lockExpiry <= now) {
+        this.processing.delete(paymentId);
+      }
+    }
+  }
+};
+
   
   // Attempt to acquire processing lock for a payment
   acquireLock(paymentId, userId, lockDurationMs = 30000) {
