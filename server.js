@@ -113,15 +113,12 @@ const cryptoPriceCache = {
 
 // ENHANCED: Global payment processing tracker with Redis-like behavior
 const paymentProcessingTracker = {
-  processing: new Map(), // paymentId -> { timestamp, userId, lockExpiry }
-  processed: new Set(),  // Set of successfully processed payment IDs
-  confirmed: new Set(),  // ✅ NEW: confirmed payments already credited
+  processing: new Map(),
+  processed: new Set(),
+  confirmed: new Set(), // ✅ NEW SET to track confirmed payments
 
-  acquireLock: function (paymentId, userId, lockDurationMs) {
-    lockDurationMs = lockDurationMs || 30000; // Fallback for older Node versions
-
+  acquireLock(paymentId, userId, lockDurationMs = 30000) {
     const now = Date.now();
-
     if (this.processed.has(paymentId) || this.confirmed.has(paymentId)) {
       return { acquired: false, reason: 'already_processed' };
     }
@@ -144,32 +141,31 @@ const paymentProcessingTracker = {
     return { acquired: true };
   },
 
-  markProcessed: function (paymentId) {
+  markProcessed(paymentId) {
     this.processing.delete(paymentId);
     this.processed.add(paymentId);
-    this.confirmed.add(paymentId);
+    this.confirmed.add(paymentId); // ✅ add here
 
+    // Prune old
     const maxSize = 10000;
     if (this.processed.size > maxSize) {
-      const entries = Array.from(this.processed);
-      this.processed = new Set(entries.slice(-maxSize / 2));
+      const entries = Array.from(this.processed).slice(-maxSize / 2);
+      this.processed = new Set(entries);
     }
     if (this.confirmed.size > maxSize) {
-      const entries = Array.from(this.confirmed);
-      this.confirmed = new Set(entries.slice(-maxSize / 2));
+      const entries = Array.from(this.confirmed).slice(-maxSize / 2);
+      this.confirmed = new Set(entries);
     }
   },
 
-  releaseLock: function (paymentId) {
+  releaseLock(paymentId) {
     this.processing.delete(paymentId);
   },
 
-  cleanup: function () {
+  cleanup() {
     const now = Date.now();
-    for (const [paymentId, lock] of this.processing.entries()) {
-      if (lock.lockExpiry <= now) {
-        this.processing.delete(paymentId);
-      }
+    for (const [id, lock] of this.processing.entries()) {
+      if (lock.lockExpiry <= now) this.processing.delete(id);
     }
   }
 };
