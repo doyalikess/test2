@@ -113,8 +113,63 @@ const cryptoPriceCache = {
 
 // ENHANCED: Global payment processing tracker with Redis-like behavior
 const paymentProcessingTracker = {
-  processing: new Map(), // paymentId -> { timestamp, userId, lockExpiry }
-  processed: new Set(), // Set of successfully processed payment IDs
+  processing: new Map(),
+  processed: new Set(),
+  confirmed: new Set(), // ✅ NEW SET to track confirmed payments
+
+  acquireLock(paymentId, userId, lockDurationMs = 30000) {
+    const now = Date.now();
+    if (this.processed.has(paymentId) || this.confirmed.has(paymentId)) {
+      return { acquired: false, reason: 'already_processed' };
+    }
+
+    if (this.processing.has(paymentId)) {
+      const lock = this.processing.get(paymentId);
+      if (lock.lockExpiry > now) {
+        return { acquired: false, reason: 'currently_processing', existingUserId: lock.userId };
+      } else {
+        this.processing.delete(paymentId);
+      }
+    }
+
+    this.processing.set(paymentId, {
+      timestamp: now,
+      userId,
+      lockExpiry: now + lockDurationMs
+    });
+
+    return { acquired: true };
+  },
+
+  markProcessed(paymentId) {
+    this.processing.delete(paymentId);
+    this.processed.add(paymentId);
+    this.confirmed.add(paymentId); // ✅ add here
+
+    // Prune old
+    const maxSize = 10000;
+    if (this.processed.size > maxSize) {
+      const entries = Array.from(this.processed).slice(-maxSize / 2);
+      this.processed = new Set(entries);
+    }
+    if (this.confirmed.size > maxSize) {
+      const entries = Array.from(this.confirmed).slice(-maxSize / 2);
+      this.confirmed = new Set(entries);
+    }
+  },
+
+  releaseLock(paymentId) {
+    this.processing.delete(paymentId);
+  },
+
+  cleanup() {
+    const now = Date.now();
+    for (const [id, lock] of this.processing.entries()) {
+      if (lock.lockExpiry <= now) this.processing.delete(id);
+    }
+  }
+};
+
   
   // Attempt to acquire processing lock for a payment
   acquireLock(paymentId, userId, lockDurationMs = 30000) {
