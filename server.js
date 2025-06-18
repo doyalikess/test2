@@ -22,10 +22,6 @@ const ReferralReward = require('./models/referralReward');
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
 
-// admin routes
-const adminRoutes = require('./admin');
-app.use('/api/admin', adminRoutes);
-
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || 'H5RMGFD-DDJMKFB-QEKXXBP-6VA0PX1';
