@@ -2348,6 +2348,11 @@ app.post('/api/payment/webhook', async (req, res) => {
         return res.status(200).json({ message: 'Payment already processed' });
       }
       
+      if (paymentProcessingTracker.confirmed.has(paymentId)) {
+  logger.warn(`❗ Payment ${paymentId} already confirmed and credited — skipping`);
+  return res.status(200).json({ message: 'Payment already confirmed' });
+}
+
       if (payment_status === 'finished' || payment_status === 'confirmed') {
         // Process the successful payment
         const amount = parseFloat(price_amount);
