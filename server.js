@@ -188,6 +188,8 @@ const securityEvents = {
 
 const app = express();
 const server = http.createServer(app);
+const adminRoutes = require('./admin');  // Make sure this path is correct
+app.use('/api/admin', adminRoutes);
 
 // Socket.IO setup with CORS for frontend origins
 const io = new Server(server, {
