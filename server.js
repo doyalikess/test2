@@ -2390,6 +2390,79 @@ app.post('/api/payment/webhook', async (req, res) => {
   }
 });
 
+// Streamer promo code creation
+app.post('/api/streamer/create-promocode', authMiddleware, async (req, res) => {
+  try {
+    const { code, value } = req.body;
+    if (!code || !value) return res.status(400).json({ error: 'Missing code or value' });
+
+    const user = await User.findById(req.userId);
+    if (!user || !user.roles.includes('streamer')) {
+      return res.status(403).json({ error: 'Only streamers can create promo codes' });
+    }
+
+    const existing = await PromoCode.findOne({ code });
+    if (existing) {
+      return res.status(400).json({ error: 'Promo code already exists' });
+    }
+
+    const promo = new PromoCode({
+      code,
+      value,
+      createdBy: user._id,
+      createdAt: new Date()
+    });
+    await promo.save();
+
+    res.json({ success: true, promo });
+  } catch (err) {
+    logger.error('Error creating promo code:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin add role to user
+app.post('/api/admin/user/:userId/add-role', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { role } = req.body;
+    if (!role) return res.status(400).json({ error: 'Role is required' });
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (!user.roles.includes(role)) {
+      user.roles.push(role);
+      await user.save();
+    }
+
+    res.json({ success: true, roles: user.roles });
+  } catch (err) {
+    logger.error('Error adding role:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin add balance
+app.post('/api/admin/user/:userId/add-balance', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { amount } = req.body;
+    if (!amount) return res.status(400).json({ error: 'Amount is required' });
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.balance += parseFloat(amount);
+    await user.save();
+
+    res.json({ success: true, balance: user.balance });
+  } catch (err) {
+    logger.error('Error adding balance:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Rest of your endpoints continue here...
 // Mock payment webhook for testing
 app.post('/api/payment/webhook-test', authMiddleware, async (req, res) => {
