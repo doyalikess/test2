@@ -1630,6 +1630,7 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     res.json({
+      _id: user._id,  // ✅ THIS LINE
       username: user.username,
       balance: user.balance,
       referralCode: user.referralCode,
