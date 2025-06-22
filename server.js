@@ -680,7 +680,65 @@ async function startJackpotGame(io) {
   socket.on('authenticate', ({ userId }) => {
     if (userId) {
       socket.join(`user-${userId}`);
+      socket.userId = userId;
       logger.info(`User ${userId} authenticated and joined their room`);
+    }
+  });
+  
+  // Game room management for real-time player counts
+  socket.on('join_game_room', (data) => {
+    try {
+      if (data.game) {
+        const roomName = `game_${data.game}`;
+        socket.join(roomName);
+        socket.currentGameRoom = roomName;
+        
+        // Get room member count and broadcast update
+        const room = io.sockets.adapter.rooms.get(roomName);
+        const playerCount = room ? room.size : 0;
+        
+        logger.info(`User joined ${roomName}, current players: ${playerCount}`);
+        
+        // Broadcast updated player count to all users in the room
+        io.to(roomName).emit(`${data.game}_players_update`, {
+          count: playerCount,
+          timestamp: new Date().toISOString()
+        });
+        
+        // Also emit general online players update
+        io.to(roomName).emit('online_players_update', {
+          count: playerCount,
+          game: data.game,
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (error) {
+      logger.error('Join game room error:', error);
+    }
+  });
+  
+  socket.on('leave_game_room', (data) => {
+    try {
+      if (data.game && socket.currentGameRoom) {
+        const roomName = `game_${data.game}`;
+        socket.leave(roomName);
+        
+        // Get updated room member count and broadcast
+        const room = io.sockets.adapter.rooms.get(roomName);
+        const playerCount = room ? room.size : 0;
+        
+        logger.info(`User left ${roomName}, current players: ${playerCount}`);
+        
+        // Broadcast updated player count
+        io.to(roomName).emit(`${data.game}_players_update`, {
+          count: playerCount,
+          timestamp: new Date().toISOString()
+        });
+        
+        socket.currentGameRoom = null;
+      }
+    } catch (error) {
+      logger.error('Leave game room error:', error);
     }
   });
 
@@ -1222,6 +1280,32 @@ async function startJackpotGame(io) {
 
   socket.on('disconnect', () => {
     logger.info('❌ A user disconnected');
+    
+    // Clean up game room if user was in one
+    if (socket.currentGameRoom) {
+      const roomName = socket.currentGameRoom;
+      const gameType = roomName.replace('game_', '');
+      
+      // Get updated room member count and broadcast after a small delay
+      setTimeout(() => {
+        const room = io.sockets.adapter.rooms.get(roomName);
+        const playerCount = room ? room.size : 0;
+        
+        logger.info(`User disconnected from ${roomName}, current players: ${playerCount}`);
+        
+        // Broadcast updated player count
+        io.to(roomName).emit(`${gameType}_players_update`, {
+          count: playerCount,
+          timestamp: new Date().toISOString()
+        });
+        
+        io.to(roomName).emit('online_players_update', {
+          count: playerCount,
+          game: gameType,
+          timestamp: new Date().toISOString()
+        });
+      }, 100); // Small delay to ensure disconnect is processed
+    }
 
     if (!jackpotGame.isRunning) {
       const idx = jackpotGame.players.findIndex(p => p.socketId === socket.id);
@@ -2497,6 +2581,223 @@ app.get('/api/game/stats', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     logger.error('Get game stats error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// UPGRADER GAME ENDPOINTS FOR REACT COMPONENT
+app.post('/api/upgrader', authMiddleware, async (req, res) => {
+  try {
+    const { itemValue, multiplier } = req.body;
+    
+    if (!itemValue || itemValue <= 0) {
+      return res.status(400).json({ error: 'Invalid item value' });
+    }
+    
+    if (!multiplier || multiplier < 1) {
+      return res.status(400).json({ error: 'Invalid multiplier. Must be >= 1' });
+    }
+    
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (user.balance < itemValue) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+    
+    // Calculate win chance based on multiplier
+    const chance = Math.min(95, (1 / multiplier) * 100);
+    
+    // Record the wager
+    const wager = await recordWager(req.userId, 'upgrader', itemValue);
+    
+    // Track wager progress if user has wager requirements
+    if (user.recordWagerProgress) {
+      user.recordWagerProgress(itemValue);
+    }
+    
+    // Update user level based on wagering
+    updateUserLevel(user);
+    
+    // Track wager stats
+    user.totalWagered = (user.totalWagered || 0) + itemValue;
+    user.balance -= itemValue;
+    
+    // Generate random roll (0-100)
+    const roll = Math.random() * 100;
+    const won = roll <= chance;
+    
+    let profit = 0;
+    let newBalance = user.balance;
+    
+    if (won) {
+      profit = itemValue * multiplier - itemValue;
+      newBalance = user.balance + (itemValue * multiplier);
+      user.balance = newBalance;
+      
+      // Record win
+      await user.recordGameOutcome(true, profit);
+      await updateWagerOutcome(wager._id, 'win', profit);
+      
+      // Track high win
+      if (profit > 100) {
+        io.emit('high_win', {
+          username: user.username,
+          game: 'upgrader',
+          profit,
+          multiplier
+        });
+      }
+      
+      // Check for level up
+      const oldLevel = user.level?.current || 1;
+      updateUserLevel(user);
+      const newLevel = user.level?.current || 1;
+      
+      if (newLevel > oldLevel) {
+        // Award cases for level up
+        const casesAwarded = getCasesForLevel(newLevel);
+        const caseName = getCaseNameForLevel(newLevel);
+        awardCasesToUser(user, caseName, casesAwarded);
+        
+        io.to(req.userId).emit('level_up', {
+          newLevel,
+          levelName: user.level.name,
+          casesAwarded,
+          caseName
+        });
+      }
+    } else {
+      profit = -itemValue;
+      await user.recordGameOutcome(false, itemValue);
+      await updateWagerOutcome(wager._id, 'loss', profit);
+    }
+    
+    // Store recent game in user's game stats
+    if (!user.gameStats) {
+      user.gameStats = new Map();
+    }
+    
+    const upgraderStats = user.gameStats.get('upgrader') || {
+      totalGames: 0,
+      totalWagered: 0,
+      totalProfit: 0,
+      recentGames: []
+    };
+    
+    upgraderStats.totalGames += 1;
+    upgraderStats.totalWagered += itemValue;
+    upgraderStats.totalProfit += profit;
+    
+    // Add to recent games (keep last 10)
+    upgraderStats.recentGames.unshift({
+      amount: itemValue,
+      multiplier: parseFloat(multiplier),
+      won,
+      profit,
+      roll: parseFloat(roll.toFixed(2)),
+      chance: parseFloat(chance.toFixed(2)),
+      timestamp: new Date()
+    });
+    
+    if (upgraderStats.recentGames.length > 10) {
+      upgraderStats.recentGames = upgraderStats.recentGames.slice(0, 10);
+    }
+    
+    user.gameStats.set('upgrader', upgraderStats);
+    
+    await user.save();
+    
+    // Emit balance update
+    io.to(req.userId).emit('balance_update', {
+      newBalance,
+      change: won ? profit : -itemValue
+    });
+    
+    res.json({
+      win: won,
+      result: won ? `Upgrade successful! Won $${(itemValue * multiplier).toFixed(2)}` : `Upgrade failed. Lost $${itemValue.toFixed(2)}`,
+      newBalance,
+      chance: parseFloat(chance.toFixed(2)),
+      roll: parseFloat(roll.toFixed(2)),
+      profit,
+      multiplier: parseFloat(multiplier)
+    });
+    
+  } catch (err) {
+    logger.error('Upgrader game error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get user's upgrader statistics
+app.get('/api/user/upgrader-stats', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const upgraderStats = user.gameStats?.get('upgrader') || {
+      totalGames: 0,
+      totalWagered: 0,
+      totalProfit: 0,
+      recentGames: []
+    };
+    
+    res.json({
+      totalWagered: upgraderStats.totalWagered || 0,
+      totalGames: upgraderStats.totalGames || 0,
+      totalProfit: upgraderStats.totalProfit || 0,
+      winRate: upgraderStats.totalGames > 0 ? 
+        ((upgraderStats.recentGames.filter(g => g.won).length / upgraderStats.totalGames) * 100).toFixed(2) : 
+        0
+    });
+  } catch (err) {
+    logger.error('Get upgrader stats error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get user's recent upgrader games
+app.get('/api/user/recent-upgrader-games', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const upgraderStats = user.gameStats?.get('upgrader') || {
+      recentGames: []
+    };
+    
+    res.json({
+      games: upgraderStats.recentGames || []
+    });
+  } catch (err) {
+    logger.error('Get recent upgrader games error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get online players count
+app.get('/api/stats/online-players', authMiddleware, async (req, res) => {
+  try {
+    // Get connected socket count as approximation
+    const connectedSockets = io.engine.clientsCount || 0;
+    
+    // Add some randomization for demo purposes (500-1500 range)
+    const baseCount = Math.floor(Math.random() * 1000) + 500;
+    const onlineCount = Math.max(connectedSockets, baseCount);
+    
+    res.json({
+      count: onlineCount,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    logger.error('Get online players error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });// BULLETPROOF webhook handler with enhanced duplicate prevention
