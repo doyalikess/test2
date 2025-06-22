@@ -94,15 +94,29 @@ class RateLimiter {
 
 // Create rate limiters
 const authLimiter = new RateLimiter(
-  5 * 1000, // 5 seconds
-  200, // limit each IP to 20 requests per window
+  15 * 1000, // 15 seconds (increased window)
+  10, // limit each IP to 10 login attempts per 15 seconds (reasonable for auth)
   { error: 'Too many login attempts, please try again later' }
 );
 
 const apiLimiter = new RateLimiter(
   60 * 1000, // 1 minute
-  60, // limit each IP to 60 requests per minute
+  300, // limit each IP to 300 requests per minute (5 requests per second for gaming)
   { error: 'Too many requests, please try again later' }
+);
+
+// Game-specific rate limiter - more permissive for gameplay
+const gameLimiter = new RateLimiter(
+  60 * 1000, // 1 minute
+  600, // limit each IP to 600 requests per minute (10 requests per second for active gaming)
+  { error: 'Too many game requests, please slow down slightly' }
+);
+
+// Strict rate limiter for sensitive operations
+const strictLimiter = new RateLimiter(
+  60 * 1000, // 1 minute
+  30, // limit each IP to 30 requests per minute for sensitive operations
+  { error: 'Too many sensitive requests, please wait before trying again' }
 );
 
 // Cache for crypto prices
@@ -1401,8 +1415,24 @@ const rawBodySaver = (req, res, buf, encoding) => {
 };
 app.use(express.json({ verify: rawBodySaver }));
 
-// Apply rate limiters
-app.use('/api/auth/', authLimiter.middleware());
+// Apply rate limiters with different levels for different endpoints
+app.use('/api/auth/', authLimiter.middleware()); // Auth endpoints - moderate limiting
+
+// Game endpoints - very permissive for smooth gameplay
+app.use('/api/game/', gameLimiter.middleware());
+app.use('/api/upgrader', gameLimiter.middleware());
+app.use('/api/coinflip/', gameLimiter.middleware());
+app.use('/api/limbo/', gameLimiter.middleware());
+app.use('/api/user/upgrader-stats', gameLimiter.middleware());
+app.use('/api/user/recent-upgrader-games', gameLimiter.middleware());
+app.use('/api/stats/online-players', gameLimiter.middleware());
+
+// Sensitive endpoints - strict limiting
+app.use('/api/admin/', strictLimiter.middleware());
+app.use('/api/wallet/', strictLimiter.middleware());
+app.use('/api/withdraw/', strictLimiter.middleware());
+
+// General API endpoints - moderate limiting
 app.use('/api/', apiLimiter.middleware());
 
 // Connect to MongoDB
