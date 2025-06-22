@@ -2882,61 +2882,67 @@ app.get('/api/stats/online-players', authMiddleware, async (req, res) => {
 
 // AIRDROP CUP GAME ENDPOINTS
 
-// Airdrop game difficulty presets
+// Airdrop game difficulty presets - Balanced for better gameplay
 const AIRDROP_DIFFICULTY_PRESETS = {
   easy: { 
     name: "Easy", 
     cups: 3, 
     winningCups: 2, 
     losingCups: 1, 
-    multiplier: 1.35,
+    multiplier: 1.4,
     description: "2 prizes, 1 fake - Perfect for beginners!",
-    color: "#10b981" // Green
+    color: "#10b981", // Green
+    rtp: 93.3 // Return to Player percentage
   },
   medium: { 
     name: "Medium", 
     cups: 4, 
     winningCups: 1, 
     losingCups: 3, 
-    multiplier: 3.6,
+    multiplier: 3.8,
     description: "1 prize, 3 fakes - Balanced risk/reward",
-    color: "#3b82f6" // Blue
+    color: "#3b82f6", // Blue
+    rtp: 85.5
   },
   hard: { 
     name: "Hard", 
     cups: 5, 
     winningCups: 1, 
     losingCups: 4, 
-    multiplier: 4.5,
+    multiplier: 4.7,
     description: "1 prize, 4 fakes - For experienced players",
-    color: "#f59e0b" // Orange
+    color: "#f59e0b", // Orange
+    rtp: 84.6
   },
   expert: { 
     name: "Expert", 
     cups: 6, 
     winningCups: 1, 
     losingCups: 5, 
-    multiplier: 5.4,
+    multiplier: 5.6,
     description: "1 prize, 5 fakes - High risk, high reward!",
-    color: "#ef4444" // Red
+    color: "#ef4444", // Red
+    rtp: 84.0
   },
   insane: { 
     name: "Insane", 
     cups: 8, 
     winningCups: 1, 
     losingCups: 7, 
-    multiplier: 7.2,
+    multiplier: 7.5,
     description: "1 prize, 7 fakes - Only for the brave!",
-    color: "#8b5cf6" // Purple
+    color: "#8b5cf6", // Purple
+    rtp: 84.4
   },
   legendary: { 
     name: "Legendary", 
     cups: 10, 
     winningCups: 1, 
     losingCups: 9, 
-    multiplier: 9.0,
+    multiplier: 9.5,
     description: "1 prize, 9 fakes - LEGENDARY rewards!",
-    color: "#f97316" // Amber
+    color: "#f97316", // Amber
+    rtp: 85.5
   }
 };
 
