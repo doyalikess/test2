@@ -464,6 +464,38 @@ function trackSuspiciousActivity(type, details) {
   logger.warn(`Suspicious activity detected: ${type}`, details);
 }
 
+// Helper function to get cases awarded for level
+function getCasesForLevel(level) {
+  if (level < 10) return 1;
+  if (level < 20) return 2;
+  if (level < 50) return 3;
+  return Math.floor(level / 10);
+}
+
+// Helper function to get case name for level
+function getCaseNameForLevel(level) {
+  if (level < 25) return 'common';
+  if (level < 50) return 'rare';
+  if (level < 75) return 'epic';
+  return 'legendary';
+}
+
+// Helper function to award cases to user
+function awardCasesToUser(user, caseName, amount) {
+  try {
+    if (!user.caseInventory) {
+      user.caseInventory = new Map();
+    }
+    
+    const currentAmount = user.caseInventory.get(caseName) || 0;
+    user.caseInventory.set(caseName, currentAmount + amount);
+    
+    logger.info(`Awarded ${amount} ${caseName} cases to user ${user.username} for reaching level ${user.level?.current || 1}`);
+  } catch (error) {
+    logger.error('Error awarding cases to user:', error);
+  }
+}
+
 // Helper function to update user level based on total wagering
 function updateUserLevel(user) {
   if (!user) return;
@@ -2286,6 +2318,185 @@ app.get('/api/user/case-history', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     logger.error('Get case history error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// COINFLIP GAME ENDPOINTS FOR REACT COMPONENT
+app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
+  try {
+    const { amount, choice } = req.body;
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid bet amount' });
+    }
+    
+    if (!['heads', 'tails'].includes(choice)) {
+      return res.status(400).json({ error: 'Invalid choice. Must be heads or tails' });
+    }
+    
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (user.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+    
+    // Record the wager
+    const wager = await recordWager(req.userId, 'coinflip', amount);
+    
+    // Track wager progress if user has wager requirements
+    if (user.recordWagerProgress) {
+      user.recordWagerProgress(amount);
+    }
+    
+    // Update user level based on wagering
+    updateUserLevel(user);
+    
+    // Track wager stats
+    user.totalWagered = (user.totalWagered || 0) + amount;
+    user.balance -= amount;
+    
+    // Generate random outcome
+    const outcome = Math.random() < 0.5 ? 'heads' : 'tails';
+    const won = outcome === choice;
+    
+    let profit = 0;
+    if (won) {
+      profit = amount; // 2x payout (original bet + winnings)
+      user.balance += amount * 2;
+      
+      // Record win
+      await user.recordGameOutcome(true, profit);
+      await updateWagerOutcome(wager._id, 'win', profit);
+      
+      // Track high win
+      if (profit > 100) {
+        io.emit('high_win', {
+          username: user.username,
+          game: 'coinflip',
+          profit,
+          multiplier: 2.0
+        });
+      }
+      
+      // Emit level up if threshold reached
+      const oldLevel = user.level?.current || 1;
+      updateUserLevel(user);
+      const newLevel = user.level?.current || 1;
+      
+      if (newLevel > oldLevel) {
+        // Award cases for level up
+        const casesAwarded = getCasesForLevel(newLevel);
+        const caseName = getCaseNameForLevel(newLevel);
+        awardCasesToUser(user, caseName, casesAwarded);
+        
+        io.to(req.userId).emit('level_up', {
+          newLevel,
+          levelName: user.level.name,
+          casesAwarded,
+          caseName
+        });
+      }
+    } else {
+      profit = -amount;
+      await user.recordGameOutcome(false, amount);
+      await updateWagerOutcome(wager._id, 'loss', profit);
+    }
+    
+    await user.save();
+    
+    // Emit balance update
+    io.to(req.userId).emit('balance_update', {
+      newBalance: user.balance,
+      change: won ? amount : -amount
+    });
+    
+    res.json({
+      outcome,
+      won,
+      profit,
+      newBalance: user.balance,
+      multiplier: won ? 2.0 : 0
+    });
+    
+  } catch (err) {
+    logger.error('Coinflip game error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get coinflip statistics
+app.get('/api/game/coinflip/stats', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Get user's game stats for coinflip
+    const coinflipStats = user.gameStats?.get('coinflip') || {
+      totalGames: 0,
+      totalWagered: 0,
+      totalWon: 0,
+      totalLost: 0,
+      winStreak: 0,
+      bestWinStreak: 0,
+      profit: 0
+    };
+    
+    res.json({
+      stats: coinflipStats,
+      recentGames: user.recentGames || []
+    });
+  } catch (err) {
+    logger.error('Get coinflip stats error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get recent coinflip games
+app.get('/api/game/coinflip/recent', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Return recent games from user object
+    const recentGames = user.recentGames || [];
+    
+    res.json({
+      recentGames: recentGames.slice(0, 10) // Last 10 games
+    });
+  } catch (err) {
+    logger.error('Get recent coinflip games error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Generic game statistics endpoint
+app.get('/api/game/stats', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({
+      totalGames: user.gamesPlayed || 0,
+      totalWins: user.gamesWon || 0,
+      totalLosses: user.gamesLost || 0,
+      totalWagered: user.totalWagered || 0,
+      totalProfit: user.totalProfit || 0,
+      highestWin: user.highestWin || 0,
+      winRate: user.gamesPlayed > 0 ? ((user.gamesWon || 0) / user.gamesPlayed * 100).toFixed(2) : 0,
+      recentGames: user.recentGames || []
+    });
+  } catch (err) {
+    logger.error('Get game stats error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });// BULLETPROOF webhook handler with enhanced duplicate prevention
