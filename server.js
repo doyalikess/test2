@@ -119,6 +119,20 @@ const strictLimiter = new RateLimiter(
   { error: 'Too many sensitive requests, please wait before trying again' }
 );
 
+// CASINO CONFIGURATION
+const HOUSE_EDGE = 0.10; // 10% house edge for all games
+const COINFLIP_WIN_CHANCE = 0.5 - (HOUSE_EDGE / 2); // 45% win chance for coinflip (was 50%)
+
+/*
+ * HOUSE EDGE IMPLEMENTATION:
+ * - Coinflip: 45% win chance instead of 50% (10% house edge)
+ * - Upgrader: Win chances reduced by 10% (e.g., 2x = 45% instead of 50%)
+ * - Limbo: Win chances reduced by 10% (e.g., 2x = 45% instead of 50%)
+ * 
+ * This ensures the casino maintains a statistical advantage while 
+ * keeping games fair and transparent.
+ */
+
 // Cache for crypto prices
 const cryptoPriceCache = {
   prices: {},
@@ -320,8 +334,9 @@ function generateLimboResult() {
 }
 
 function calculateLimboWinChance(targetMultiplier) {
-  // The chance to win is 1/targetMultiplier
-  return (1 / targetMultiplier) * 100;
+  // The chance to win is 1/targetMultiplier, reduced by house edge
+  const theoreticalChance = (1 / targetMultiplier) * 100;
+  return theoreticalChance * (1 - HOUSE_EDGE);
 }
 
 // Generate a transaction ID
@@ -1618,6 +1633,32 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
   }
 });
 
+// ADMIN ENDPOINTS FOR HOUSE EDGE MANAGEMENT
+// Get current house edge configuration
+app.get('/api/admin/house-edge', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user || !user.isAdmin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    res.json({
+      houseEdge: HOUSE_EDGE,
+      houseEdgePercent: (HOUSE_EDGE * 100).toFixed(2),
+      coinflipWinChance: COINFLIP_WIN_CHANCE,
+      coinflipWinChancePercent: (COINFLIP_WIN_CHANCE * 100).toFixed(2),
+      explanation: {
+        coinflip: `Players have ${(COINFLIP_WIN_CHANCE * 100).toFixed(1)}% win chance instead of 50%`,
+        upgrader: `Win chances reduced by ${(HOUSE_EDGE * 100).toFixed(1)}% (e.g., 2x = ${(45).toFixed(1)}% instead of 50%)`,
+        limbo: `Win chances reduced by ${(HOUSE_EDGE * 100).toFixed(1)}% (e.g., 2x = ${(45).toFixed(1)}% instead of 50%)`
+      }
+    });
+  } catch (err) {
+    logger.error('Get house edge error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Get wager requirement status (alternative endpoint that Dashboard may call)
 app.get('/api/user/wager-requirement', authMiddleware, async (req, res) => {
   try {
@@ -2473,8 +2514,13 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     user.totalWagered = (user.totalWagered || 0) + amount;
     user.balance -= amount;
     
-    // Generate random outcome
-    const outcome = Math.random() < 0.5 ? 'heads' : 'tails';
+    // Generate random outcome with house edge (45% win chance for player)
+    const random = Math.random();
+    const playerWins = random < COINFLIP_WIN_CHANCE;
+    
+    // If player should win, outcome matches their choice
+    // If player should lose, outcome is opposite of their choice
+    const outcome = playerWins ? choice : (choice === 'heads' ? 'tails' : 'heads');
     const won = outcome === choice;
     
     let profit = 0;
@@ -2637,8 +2683,10 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
     
-    // Calculate win chance based on multiplier
-    const chance = Math.min(95, (1 / multiplier) * 100);
+    // Calculate win chance based on multiplier with house edge
+    // Reduce the theoretical chance by the house edge percentage
+    const theoreticalChance = (1 / multiplier) * 100;
+    const chance = Math.min(95, theoreticalChance * (1 - HOUSE_EDGE));
     
     // Record the wager
     const wager = await recordWager(req.userId, 'upgrader', itemValue);
@@ -3316,7 +3364,7 @@ app.post('/api/upgrader/play', authMiddleware, async (req, res) => {
     
     // Generate random result (0.00 to 100.00)
     const result = Math.random() * 100;
-    const winChance = 100 / targetMultiplier;
+    const winChance = (100 / targetMultiplier) * (1 - HOUSE_EDGE);
     const won = result < winChance;
     
     let profit = 0;
@@ -3394,9 +3442,15 @@ app.post('/api/coinflip/play', authMiddleware, async (req, res) => {
     user.totalWagered = (user.totalWagered || 0) + amount;
     user.balance -= amount;
     
-    // Generate random result
-    const result = Math.random() < 0.5 ? 'heads' : 'tails';
-    const won = result === side.toLowerCase();
+    // Generate random result with house edge (45% win chance for player)
+    const random = Math.random();
+    const playerWins = random < COINFLIP_WIN_CHANCE;
+    const playerChoice = side.toLowerCase();
+    
+    // If player should win, result matches their choice
+    // If player should lose, result is opposite of their choice
+    const result = playerWins ? playerChoice : (playerChoice === 'heads' ? 'tails' : 'heads');
+    const won = result === playerChoice;
     
     let profit = 0;
     if (won) {
