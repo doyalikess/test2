@@ -2878,6 +2878,334 @@ app.get('/api/stats/online-players', authMiddleware, async (req, res) => {
     logger.error('Get online players error:', err);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// AIRDROP CUP GAME ENDPOINTS
+
+// Airdrop game difficulty presets
+const AIRDROP_DIFFICULTY_PRESETS = {
+  easy: { 
+    name: "Easy", 
+    cups: 3, 
+    winningCups: 2, 
+    losingCups: 1, 
+    multiplier: 1.35,
+    description: "2 prizes, 1 fake - Perfect for beginners!",
+    color: "#10b981" // Green
+  },
+  medium: { 
+    name: "Medium", 
+    cups: 4, 
+    winningCups: 1, 
+    losingCups: 3, 
+    multiplier: 3.6,
+    description: "1 prize, 3 fakes - Balanced risk/reward",
+    color: "#3b82f6" // Blue
+  },
+  hard: { 
+    name: "Hard", 
+    cups: 5, 
+    winningCups: 1, 
+    losingCups: 4, 
+    multiplier: 4.5,
+    description: "1 prize, 4 fakes - For experienced players",
+    color: "#f59e0b" // Orange
+  },
+  expert: { 
+    name: "Expert", 
+    cups: 6, 
+    winningCups: 1, 
+    losingCups: 5, 
+    multiplier: 5.4,
+    description: "1 prize, 5 fakes - High risk, high reward!",
+    color: "#ef4444" // Red
+  },
+  insane: { 
+    name: "Insane", 
+    cups: 8, 
+    winningCups: 1, 
+    losingCups: 7, 
+    multiplier: 7.2,
+    description: "1 prize, 7 fakes - Only for the brave!",
+    color: "#8b5cf6" // Purple
+  },
+  legendary: { 
+    name: "Legendary", 
+    cups: 10, 
+    winningCups: 1, 
+    losingCups: 9, 
+    multiplier: 9.0,
+    description: "1 prize, 9 fakes - LEGENDARY rewards!",
+    color: "#f97316" // Amber
+  }
+};
+
+// Play airdrop game
+app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
+  try {
+    const { amount, difficulty, selectedCup } = req.body;
+    
+    // Validate inputs
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid bet amount' });
+    }
+    
+    if (!difficulty || !AIRDROP_DIFFICULTY_PRESETS[difficulty]) {
+      return res.status(400).json({ error: 'Invalid difficulty. Choose from: easy, medium, hard, expert, insane, legendary' });
+    }
+    
+    const config = AIRDROP_DIFFICULTY_PRESETS[difficulty];
+    
+    if (!selectedCup || selectedCup < 1 || selectedCup > config.cups) {
+      return res.status(400).json({ error: `Invalid cup selection. Choose from 1 to ${config.cups}` });
+    }
+    
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (user.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+    
+    // Calculate win chance with house edge
+    const theoreticalChance = (config.winningCups / config.cups) * 100;
+    const actualChance = theoreticalChance * (1 - HOUSE_EDGE);
+    
+    // Record the wager
+    const wager = await recordWager(req.userId, 'airdrop', amount);
+    
+    // Track wager progress
+    if (user.recordWagerProgress) {
+      user.recordWagerProgress(amount);
+    }
+    
+    // Update user level based on wagering
+    updateUserLevel(user);
+    
+    // Track wager stats
+    user.totalWagered = (user.totalWagered || 0) + amount;
+    user.balance -= amount;
+    
+    // Generate winning cups positions
+    const winningCupPositions = [];
+    const allPositions = Array.from({ length: config.cups }, (_, i) => i + 1);
+    
+    // Randomly select winning cup positions
+    while (winningCupPositions.length < config.winningCups) {
+      const randomIndex = Math.floor(Math.random() * allPositions.length);
+      const position = allPositions.splice(randomIndex, 1)[0];
+      winningCupPositions.push(position);
+    }
+    
+    // Determine if player wins (with house edge)
+    const random = Math.random() * 100;
+    const playerShouldWin = random < actualChance;
+    
+    // If player should win, ensure their cup is in winning positions
+    // If player should lose, ensure their cup is NOT in winning positions
+    let finalWinningPositions = [...winningCupPositions];
+    
+    if (playerShouldWin && !winningCupPositions.includes(selectedCup)) {
+      // Replace a random winning position with player's selection
+      const replaceIndex = Math.floor(Math.random() * finalWinningPositions.length);
+      finalWinningPositions[replaceIndex] = selectedCup;
+    } else if (!playerShouldWin && winningCupPositions.includes(selectedCup)) {
+      // Replace player's position with a different one
+      const playerIndex = finalWinningPositions.indexOf(selectedCup);
+      const availablePositions = allPositions.filter(p => !finalWinningPositions.includes(p));
+      if (availablePositions.length > 0) {
+        const newPosition = availablePositions[Math.floor(Math.random() * availablePositions.length)];
+        finalWinningPositions[playerIndex] = newPosition;
+      }
+    }
+    
+    const won = finalWinningPositions.includes(selectedCup);
+    let profit = 0;
+    let newBalance = user.balance;
+    
+    if (won) {
+      profit = amount * config.multiplier - amount;
+      newBalance = user.balance + (amount * config.multiplier);
+      user.balance = newBalance;
+      
+      // Record win
+      await user.recordGameOutcome(true, profit);
+      await updateWagerOutcome(wager._id, 'win', profit);
+      
+      // Track high win
+      if (profit > 100) {
+        io.emit('high_win', {
+          username: user.username,
+          game: 'airdrop',
+          profit,
+          multiplier: config.multiplier
+        });
+      }
+      
+      // Check for level up
+      const oldLevel = user.level?.current || 1;
+      updateUserLevel(user);
+      const newLevel = user.level?.current || 1;
+      
+      if (newLevel > oldLevel) {
+        const casesAwarded = getCasesForLevel(newLevel);
+        const caseName = getCaseNameForLevel(newLevel);
+        awardCasesToUser(user, caseName, casesAwarded);
+        
+        io.to(req.userId).emit('level_up', {
+          newLevel,
+          levelName: user.level.name,
+          casesAwarded,
+          caseName
+        });
+      }
+    } else {
+      profit = -amount;
+      await user.recordGameOutcome(false, amount);
+      await updateWagerOutcome(wager._id, 'loss', profit);
+    }
+    
+    // Store recent game in user's game stats
+    if (!user.gameStats) {
+      user.gameStats = new Map();
+    }
+    
+    const airdropStats = user.gameStats.get('airdrop') || {
+      totalGames: 0,
+      totalWagered: 0,
+      totalProfit: 0,
+      recentGames: []
+    };
+    
+    airdropStats.totalGames += 1;
+    airdropStats.totalWagered += amount;
+    airdropStats.totalProfit += profit;
+    
+    // Add to recent games (keep last 10)
+    airdropStats.recentGames.unshift({
+      amount,
+      difficulty,
+      cupCount: config.cups,
+      selectedCup,
+      winningCups: finalWinningPositions.sort((a, b) => a - b),
+      won,
+      profit,
+      multiplier: config.multiplier,
+      timestamp: new Date()
+    });
+    
+    if (airdropStats.recentGames.length > 10) {
+      airdropStats.recentGames = airdropStats.recentGames.slice(0, 10);
+    }
+    
+    user.gameStats.set('airdrop', airdropStats);
+    await user.save();
+    
+    // Emit balance update
+    io.to(req.userId).emit('balance_update', {
+      newBalance,
+      change: won ? profit : -amount
+    });
+    
+    res.json({
+      won,
+      selectedCup,
+      winningCups: finalWinningPositions.sort((a, b) => a - b),
+      result: won ? `Airdrop successful! Won $${(amount * config.multiplier).toFixed(2)}` : `No prize found. Lost $${amount.toFixed(2)}`,
+      newBalance,
+      profit,
+      multiplier: config.multiplier,
+      difficulty,
+      cupCount: config.cups,
+      actualChance: parseFloat(actualChance.toFixed(2)),
+      difficultyName: config.name
+    });
+    
+  } catch (err) {
+    logger.error('Airdrop game error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get airdrop game configurations
+app.get('/api/game/airdrop/configs', authMiddleware, async (req, res) => {
+  try {
+    const configs = Object.entries(AIRDROP_DIFFICULTY_PRESETS).map(([difficulty, config]) => {
+      const theoreticalChance = (config.winningCups / config.cups) * 100;
+      const actualChance = theoreticalChance * (1 - HOUSE_EDGE);
+      
+      return {
+        difficulty,
+        name: config.name,
+        description: config.description,
+        color: config.color,
+        cups: config.cups,
+        winningCups: config.winningCups,
+        losingCups: config.losingCups,
+        multiplier: config.multiplier,
+        theoreticalChance: parseFloat(theoreticalChance.toFixed(2)),
+        actualChance: parseFloat(actualChance.toFixed(2)),
+        rtp: parseFloat((actualChance * config.multiplier / 100).toFixed(2))
+      };
+    });
+    
+    res.json({ configurations: configs });
+  } catch (err) {
+    logger.error('Get airdrop configs error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get user's airdrop statistics
+app.get('/api/user/airdrop-stats', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const airdropStats = user.gameStats?.get('airdrop') || {
+      totalGames: 0,
+      totalWagered: 0,
+      totalProfit: 0,
+      recentGames: []
+    };
+    
+    res.json({
+      totalWagered: airdropStats.totalWagered || 0,
+      totalGames: airdropStats.totalGames || 0,
+      totalProfit: airdropStats.totalProfit || 0,
+      winRate: airdropStats.totalGames > 0 ? 
+        ((airdropStats.recentGames.filter(g => g.won).length / airdropStats.totalGames) * 100).toFixed(2) : 
+        0
+    });
+  } catch (err) {
+    logger.error('Get airdrop stats error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get user's recent airdrop games
+app.get('/api/user/recent-airdrop-games', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const airdropStats = user.gameStats?.get('airdrop') || {
+      recentGames: []
+    };
+    
+    res.json({
+      games: airdropStats.recentGames || []
+    });
+  } catch (err) {
+    logger.error('Get recent airdrop games error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });// BULLETPROOF webhook handler with enhanced duplicate prevention
 app.post('/api/payment/webhook', async (req, res) => {
   const startTime = Date.now();
