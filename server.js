@@ -494,22 +494,6 @@ function getCaseNameForLevel(level) {
   return 'legendary';
 }
 
-// House Edge Configuration
-const HOUSE_EDGES = {
-  coinflip: 0.09,    // 9% house edge
-  upgrader: 0.08,    // 8% house edge
-  limbo: 0.10,       // 10% house edge
-  roulette: 0.08,    // 8% house edge
-  crash: 0.09,       // 9% house edge
-  dice: 0.08,        // 8% house edge
-  default: 0.08      // Default 8% house edge
-};
-
-// Helper function to get house edge for a game
-function getHouseEdge(gameType) {
-  return HOUSE_EDGES[gameType] || HOUSE_EDGES.default;
-}
-
 // Helper function to award cases to user
 function awardCasesToUser(user, caseName, amount) {
   try {
@@ -523,96 +507,6 @@ function awardCasesToUser(user, caseName, amount) {
     logger.info(`Awarded ${amount} ${caseName} cases to user ${user.username} for reaching level ${user.level?.current || 1}`);
   } catch (error) {
     logger.error('Error awarding cases to user:', error);
-  }
-}
-
-// Helper function to update wager progress for bonuses and referrals
-async function updateWagerProgress(user, amount) {
-  try {
-    // Update wager progress for bonuses (if user has active bonus)
-    if (user.wageringRequirement && user.wageringRequirement > 0) {
-      user.wageringProgress = (user.wageringProgress || 0) + amount;
-      
-      // Check if wager requirement is completed
-      if (user.wageringProgress >= user.wageringRequirement) {
-        user.wageringProgress = user.wageringRequirement;
-        user.wageringCompleted = true;
-        logger.info(`User ${user.username} completed wager requirement: ${user.wageringRequirement}`);
-      }
-    }
-    
-    // Update referral progress (wagering counts towards referral commissions)
-    if (user.referredBy) {
-      await processReferralWager(user.referredBy, user._id, amount);
-    }
-    
-  } catch (error) {
-    logger.error('Error updating wager progress:', error);
-  }
-}
-
-// Process referral commissions from wagering
-async function processReferralWager(referrerUserId, referredUserId, wagerAmount) {
-  try {
-    const referrer = await User.findById(referrerUserId);
-    if (!referrer) return;
-    
-    // Referral commission rate: 5% of wagered amount
-    const REFERRAL_RATE = 0.05;
-    const commission = wagerAmount * REFERRAL_RATE;
-    
-    // Initialize referral stats if not exists
-    if (!referrer.referralStats) {
-      referrer.referralStats = {
-        totalReferred: 0,
-        totalCommission: 0,
-        pendingCommission: 0,
-        lifetimeWagered: 0
-      };
-    }
-    
-    // Update referrer's stats
-    referrer.referralStats.totalCommission += commission;
-    referrer.referralStats.pendingCommission += commission;
-    referrer.referralStats.lifetimeWagered += wagerAmount;
-    
-    // Initialize referrals array if not exists
-    if (!referrer.referrals) {
-      referrer.referrals = [];
-    }
-    
-    // Update specific referral data
-    let referralData = referrer.referrals.find(r => r.userId.toString() === referredUserId.toString());
-    if (!referralData) {
-      // Add new referral data
-      referralData = {
-        userId: referredUserId,
-        username: (await User.findById(referredUserId)).username,
-        dateReferred: new Date(),
-        totalWagered: 0,
-        commissionEarned: 0
-      };
-      referrer.referrals.push(referralData);
-      referrer.referralStats.totalReferred = referrer.referrals.length;
-    }
-    
-    // Update referral specific stats
-    referralData.totalWagered += wagerAmount;
-    referralData.commissionEarned += commission;
-    
-    await referrer.save();
-    
-    // Emit real-time update to referrer
-    io.to(`user-${referrerUserId}`).emit('referral_commission', {
-      amount: commission,
-      fromUser: (await User.findById(referredUserId)).username,
-      newPendingTotal: referrer.referralStats.pendingCommission
-    });
-    
-    logger.info(`Referral commission: $${commission.toFixed(2)} earned by ${referrer.username} from ${referralData.username}'s wager`);
-    
-  } catch (error) {
-    logger.error('Error processing referral wager:', error);
   }
 }
 
@@ -2450,18 +2344,6 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
     sender.balance -= amount;
     recipient.balance += amount;
 
-    // Tips count towards wager requirements for both sender and recipient
-    await updateWagerProgress(sender, amount);
-    await updateWagerProgress(recipient, amount);
-
-    // Update level progression for both users
-    updateUserLevel(sender);
-    updateUserLevel(recipient);
-
-    // Track tip statistics
-    sender.totalTipsSent = (sender.totalTipsSent || 0) + amount;
-    recipient.totalTipsReceived = (recipient.totalTipsReceived || 0) + amount;
-
     // Save both users
     await sender.save();
     await recipient.save();
@@ -2479,28 +2361,6 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
       logger.error('Error creating tip record:', tipError);
       // Continue even if tip record fails
     }
-
-    // Emit balance updates to both users
-    io.to(`user-${sender._id}`).emit('balance_update', {
-      newBalance: sender.balance,
-      change: -amount,
-      reason: 'tip_sent'
-    });
-
-    io.to(`user-${recipient._id}`).emit('balance_update', {
-      newBalance: recipient.balance,
-      change: amount,
-      reason: 'tip_received'
-    });
-
-    // Emit tip notification to recipient
-    io.to(`user-${recipient._id}`).emit('tip_received', {
-      from: sender.username,
-      amount: amount,
-      message: `You received a $${amount.toFixed(2)} tip from ${sender.username}!`
-    });
-
-    logger.info(`Tip: ${sender.username} sent $${amount.toFixed(2)} to ${recipient.username}`);
 
     res.json({
       success: true,
@@ -2598,14 +2458,13 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
     
-    // House edge for coinflip
-    const HOUSE_EDGE = getHouseEdge('coinflip');
-    
-    // Record the wager (counts towards wager requirements)
+    // Record the wager
     const wager = await recordWager(req.userId, 'coinflip', amount);
     
-    // Track wager progress for bonuses and referrals
-    await updateWagerProgress(user, amount);
+    // Track wager progress if user has wager requirements
+    if (user.recordWagerProgress) {
+      user.recordWagerProgress(amount);
+    }
     
     // Update user level based on wagering
     updateUserLevel(user);
@@ -2620,13 +2479,8 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     
     let profit = 0;
     if (won) {
-      // Apply house edge: payout is less than 2x to account for house edge
-      // Effective payout: 2x * (1 - house_edge) = 1.82x
-      const effectivePayout = 2 * (1 - HOUSE_EDGE);
-      const winnings = amount * effectivePayout;
-      
-      profit = winnings - amount; // Net profit
-      user.balance += winnings;
+      profit = amount; // 2x payout (original bet + winnings)
+      user.balance += amount * 2;
       
       // Record win
       await user.recordGameOutcome(true, profit);
@@ -2638,11 +2492,11 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
           username: user.username,
           game: 'coinflip',
           profit,
-          multiplier: effectivePayout
+          multiplier: 2.0
         });
       }
       
-      // Check for level up
+      // Emit level up if threshold reached
       const oldLevel = user.level?.current || 1;
       updateUserLevel(user);
       const newLevel = user.level?.current || 1;
@@ -2671,7 +2525,7 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     // Emit balance update
     io.to(req.userId).emit('balance_update', {
       newBalance: user.balance,
-      change: won ? profit : -amount
+      change: won ? amount : -amount
     });
     
     res.json({
@@ -2679,8 +2533,7 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
       won,
       profit,
       newBalance: user.balance,
-      multiplier: won ? (2 * (1 - HOUSE_EDGE)) : 0,
-      houseEdge: HOUSE_EDGE
+      multiplier: won ? 2.0 : 0
     });
     
   } catch (err) {
@@ -2784,20 +2637,16 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
     
-    // House edge for upgrader
-    const HOUSE_EDGE = getHouseEdge('upgrader');
+    // Calculate win chance based on multiplier
+    const chance = Math.min(95, (1 / multiplier) * 100);
     
-    // Calculate win chance based on multiplier with house edge
-    // Original chance: (1 / multiplier) * 100
-    // With house edge: ((1 / multiplier) * (1 - house_edge)) * 100
-    const theoreticalChance = (1 / multiplier) * 100;
-    const chance = Math.min(95, theoreticalChance * (1 - HOUSE_EDGE));
-    
-    // Record the wager (counts towards wager requirements)
+    // Record the wager
     const wager = await recordWager(req.userId, 'upgrader', itemValue);
     
-    // Track wager progress for bonuses and referrals
-    await updateWagerProgress(user, itemValue);
+    // Track wager progress if user has wager requirements
+    if (user.recordWagerProgress) {
+      user.recordWagerProgress(itemValue);
+    }
     
     // Update user level based on wagering
     updateUserLevel(user);
@@ -2814,10 +2663,8 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
     let newBalance = user.balance;
     
     if (won) {
-      // Full multiplier payout (house edge already applied to win chance)
-      const winnings = itemValue * multiplier;
-      profit = winnings - itemValue;
-      newBalance = user.balance + winnings;
+      profit = itemValue * multiplier - itemValue;
+      newBalance = user.balance + (itemValue * multiplier);
       user.balance = newBalance;
       
       // Record win
@@ -2882,7 +2729,6 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
       profit,
       roll: parseFloat(roll.toFixed(2)),
       chance: parseFloat(chance.toFixed(2)),
-      houseEdge: HOUSE_EDGE,
       timestamp: new Date()
     });
     
@@ -2905,11 +2751,9 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
       result: won ? `Upgrade successful! Won $${(itemValue * multiplier).toFixed(2)}` : `Upgrade failed. Lost $${itemValue.toFixed(2)}`,
       newBalance,
       chance: parseFloat(chance.toFixed(2)),
-      theoreticalChance: parseFloat(theoreticalChance.toFixed(2)),
       roll: parseFloat(roll.toFixed(2)),
       profit,
-      multiplier: parseFloat(multiplier),
-      houseEdge: HOUSE_EDGE
+      multiplier: parseFloat(multiplier)
     });
     
   } catch (err) {
@@ -2986,440 +2830,7 @@ app.get('/api/stats/online-players', authMiddleware, async (req, res) => {
     logger.error('Get online players error:', err);
     res.status(500).json({ error: 'Server error' });
   }
-});
-
-// COMPREHENSIVE GAME ANALYTICS ENDPOINTS
-
-// Get detailed user analytics
-app.get('/api/analytics/user-stats', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const analytics = {
-      overview: {
-        totalWagered: user.totalWagered || 0,
-        totalProfit: user.totalProfit || 0,
-        gamesPlayed: user.gamesPlayed || 0,
-        winRate: user.gamesPlayed > 0 ? ((user.gamesWon || 0) / user.gamesPlayed * 100).toFixed(2) : 0,
-        averageBet: user.gamesPlayed > 0 ? (user.totalWagered / user.gamesPlayed).toFixed(2) : 0,
-        biggestWin: user.highestWin || 0,
-        currentStreak: user.currentStreak || 0,
-        bestStreak: user.bestStreak || 0
-      },
-      gameBreakdown: {},
-      timeAnalysis: {
-        sessionStart: user.lastLogin || new Date(),
-        sessionDuration: Date.now() - (user.lastLogin || Date.now()),
-        averageSessionTime: user.averageSessionTime || 0,
-        totalPlayTime: user.totalPlayTime || 0
-      },
-      progression: {
-        level: user.level?.current || 1,
-        levelName: user.level?.name || 'Rookie',
-        experience: user.level?.experience || 0,
-        nextLevelRequirement: user.level?.nextLevelRequirement || 100,
-        wageringProgress: user.wageringProgress || 0,
-        wageringRequirement: user.wageringRequirement || 0
-      }
-    };
-
-    // Analyze game-specific stats
-    if (user.gameStats) {
-      for (const [game, stats] of user.gameStats.entries()) {
-        analytics.gameBreakdown[game] = {
-          totalGames: stats.totalGames || 0,
-          totalWagered: stats.totalWagered || 0,
-          totalProfit: stats.totalProfit || 0,
-          winRate: stats.totalGames > 0 ? ((stats.wins || 0) / stats.totalGames * 100).toFixed(2) : 0,
-          averageBet: stats.totalGames > 0 ? (stats.totalWagered / stats.totalGames).toFixed(2) : 0,
-          favoriteMultiplier: stats.favoriteMultiplier || 'N/A',
-          bestWin: stats.bestWin || 0,
-          recentPerformance: stats.recentGames ? stats.recentGames.slice(0, 10) : []
-        };
-      }
-    }
-
-    res.json(analytics);
-  } catch (err) {
-    logger.error('Get user analytics error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get global game analytics (admin only)
-app.get('/api/analytics/global-stats', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user || !user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-
-    const { timeframe = '24h' } = req.query;
-    
-    let startDate;
-    switch (timeframe) {
-      case '1h':
-        startDate = new Date(Date.now() - 60 * 60 * 1000);
-        break;
-      case '24h':
-        startDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        break;
-      case '7d':
-        startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        break;
-      case '30d':
-        startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-        break;
-      default:
-        startDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    }
-
-    // Get aggregate stats from all users
-    const users = await User.find({
-      lastLogin: { $gte: startDate }
-    }).limit(1000); // Limit for performance
-
-    const analytics = {
-      timeframe,
-      overview: {
-        totalUsers: await User.countDocuments(),
-        activeUsers: users.length,
-        totalGamesPlayed: users.reduce((sum, u) => sum + (u.gamesPlayed || 0), 0),
-        totalWagered: users.reduce((sum, u) => sum + (u.totalWagered || 0), 0),
-        totalProfit: users.reduce((sum, u) => sum + (u.totalProfit || 0), 0),
-        averageWinRate: users.length > 0 ? 
-          (users.reduce((sum, u) => sum + (u.gamesPlayed > 0 ? (u.gamesWon || 0) / u.gamesPlayed : 0), 0) / users.length * 100).toFixed(2) : 0
-      },
-      gamePopularity: {},
-      playerBehavior: {
-        averageSessionTime: users.reduce((sum, u) => sum + (u.averageSessionTime || 0), 0) / Math.max(users.length, 1),
-        peakHours: [], // Could be calculated from login times
-        commonBetSizes: [],
-        retentionRate: 0 // Could be calculated from login patterns
-      },
-      performance: {
-        requestsPerSecond: Math.floor(Math.random() * 50) + 10, // Mock data
-        averageResponseTime: Math.floor(Math.random() * 200) + 50, // Mock data
-        errorRate: (Math.random() * 2).toFixed(2), // Mock data
-        uptime: '99.8%' // Mock data
-      }
-    };
-
-    // Analyze game popularity
-    const gameStats = {};
-    users.forEach(user => {
-      if (user.gameStats) {
-        for (const [game, stats] of user.gameStats.entries()) {
-          if (!gameStats[game]) {
-            gameStats[game] = {
-              totalPlayers: 0,
-              totalGames: 0,
-              totalWagered: 0,
-              totalProfit: 0
-            };
-          }
-          gameStats[game].totalPlayers++;
-          gameStats[game].totalGames += stats.totalGames || 0;
-          gameStats[game].totalWagered += stats.totalWagered || 0;
-          gameStats[game].totalProfit += stats.totalProfit || 0;
-        }
-      }
-    });
-
-    analytics.gamePopularity = gameStats;
-
-    res.json(analytics);
-  } catch (err) {
-    logger.error('Get global analytics error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get performance metrics
-app.get('/api/analytics/performance', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user || !user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-
-    // Mock performance data (in a real app, this would come from monitoring tools)
-    const performance = {
-      server: {
-        cpu: Math.floor(Math.random() * 100),
-        memory: Math.floor(Math.random() * 100),
-        disk: Math.floor(Math.random() * 100),
-        network: Math.floor(Math.random() * 1000),
-        uptime: Math.floor(Math.random() * 1000000)
-      },
-      api: {
-        totalRequests: Math.floor(Math.random() * 10000) + 5000,
-        averageResponseTime: Math.floor(Math.random() * 200) + 50,
-        errorRate: (Math.random() * 5).toFixed(2),
-        rpsLimit: 600,
-        currentRps: Math.floor(Math.random() * 100)
-      },
-      database: {
-        connectionPool: Math.floor(Math.random() * 100),
-        queryTime: Math.floor(Math.random() * 100),
-        slowQueries: Math.floor(Math.random() * 10),
-        activeConnections: Math.floor(Math.random() * 50)
-      },
-      realTime: {
-        connectedSockets: io.engine.clientsCount || 0,
-        messagesPerSecond: Math.floor(Math.random() * 50),
-        roomsActive: Object.keys(io.sockets.adapter.rooms).length,
-        latency: Math.floor(Math.random() * 100) + 10
-      }
-    };
-
-    res.json(performance);
-  } catch (err) {
-    logger.error('Get performance metrics error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get leaderboard with analytics
-app.get('/api/analytics/leaderboard', authMiddleware, async (req, res) => {
-  try {
-    const { game = 'all', metric = 'totalWagered', limit = 20 } = req.query;
-
-    let sortField;
-    switch (metric) {
-      case 'totalWagered':
-        sortField = 'totalWagered';
-        break;
-      case 'totalProfit':
-        sortField = 'totalProfit';
-        break;
-      case 'gamesPlayed':
-        sortField = 'gamesPlayed';
-        break;
-      case 'winRate':
-        sortField = 'gamesWon';
-        break;
-      default:
-        sortField = 'totalWagered';
-    }
-
-    const users = await User.find({
-      [sortField]: { $gt: 0 }
-    })
-    .sort({ [sortField]: -1 })
-    .limit(parseInt(limit))
-    .select('username totalWagered totalProfit gamesPlayed gamesWon highestWin level gameStats');
-
-    const leaderboard = users.map((user, index) => {
-      const userData = {
-        rank: index + 1,
-        username: user.username,
-        totalWagered: user.totalWagered || 0,
-        totalProfit: user.totalProfit || 0,
-        gamesPlayed: user.gamesPlayed || 0,
-        winRate: user.gamesPlayed > 0 ? ((user.gamesWon || 0) / user.gamesPlayed * 100).toFixed(2) : 0,
-        highestWin: user.highestWin || 0,
-        level: user.level?.current || 1,
-        levelName: user.level?.name || 'Rookie'
-      };
-
-      // Add game-specific stats if requested
-      if (game !== 'all' && user.gameStats && user.gameStats.has(game)) {
-        const gameStats = user.gameStats.get(game);
-        userData.gameSpecific = {
-          totalGames: gameStats.totalGames || 0,
-          totalWagered: gameStats.totalWagered || 0,
-          totalProfit: gameStats.totalProfit || 0,
-          winRate: gameStats.totalGames > 0 ? ((gameStats.wins || 0) / gameStats.totalGames * 100).toFixed(2) : 0
-        };
-      }
-
-      return userData;
-    });
-
-    res.json({
-      game,
-      metric,
-      leaderboard,
-      total: users.length,
-      lastUpdated: new Date().toISOString()
-    });
-  } catch (err) {
-    logger.error('Get leaderboard error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get house edge analytics (admin only)
-app.get('/api/analytics/house-edge', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user || !user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-
-    const { timeframe = '24h' } = req.query;
-    
-    let startDate;
-    switch (timeframe) {
-      case '1h':
-        startDate = new Date(Date.now() - 60 * 60 * 1000);
-        break;
-      case '24h':
-        startDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        break;
-      case '7d':
-        startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        break;
-      case '30d':
-        startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-        break;
-      default:
-        startDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    }
-
-    // Get all users who played in the timeframe
-    const users = await User.find({
-      lastLogin: { $gte: startDate }
-    }).limit(1000);
-
-    // Calculate house edge performance by game
-    const houseEdgeAnalytics = {};
-    let totalWagered = 0;
-    let totalProfit = 0;
-
-    for (const game in HOUSE_EDGES) {
-      if (game === 'default') continue;
-      
-      houseEdgeAnalytics[game] = {
-        configuredEdge: HOUSE_EDGES[game],
-        totalWagered: 0,
-        totalProfit: 0,
-        actualEdge: 0,
-        efficiency: 0,
-        totalGames: 0,
-        players: 0
-      };
-    }
-
-    // Analyze user game stats
-    users.forEach(user => {
-      if (user.gameStats) {
-        for (const [game, stats] of user.gameStats.entries()) {
-          if (houseEdgeAnalytics[game]) {
-            houseEdgeAnalytics[game].totalWagered += stats.totalWagered || 0;
-            houseEdgeAnalytics[game].totalProfit -= stats.totalProfit || 0; // House profit is opposite of player profit
-            houseEdgeAnalytics[game].totalGames += stats.totalGames || 0;
-            houseEdgeAnalytics[game].players++;
-            
-            totalWagered += stats.totalWagered || 0;
-            totalProfit -= stats.totalProfit || 0;
-          }
-        }
-      }
-    });
-
-    // Calculate actual house edge and efficiency
-    for (const game in houseEdgeAnalytics) {
-      const analytics = houseEdgeAnalytics[game];
-      if (analytics.totalWagered > 0) {
-        analytics.actualEdge = (analytics.totalProfit / analytics.totalWagered) * 100;
-        analytics.efficiency = (analytics.actualEdge / (HOUSE_EDGES[game] * 100)) * 100;
-      }
-    }
-
-    const overallEdge = totalWagered > 0 ? (totalProfit / totalWagered) * 100 : 0;
-    const targetOverallEdge = Object.values(HOUSE_EDGES).reduce((sum, edge, index, arr) => {
-      if (index === arr.length - 1) return sum; // Skip 'default'
-      return sum + edge;
-    }, 0) / (Object.keys(HOUSE_EDGES).length - 1) * 100;
-
-    res.json({
-      timeframe,
-      overallStats: {
-        totalWagered,
-        totalProfit,
-        actualEdge: overallEdge.toFixed(2),
-        targetEdge: targetOverallEdge.toFixed(2),
-        efficiency: targetOverallEdge > 0 ? ((overallEdge / targetOverallEdge) * 100).toFixed(2) : 0
-      },
-      gameAnalytics: houseEdgeAnalytics,
-      houseEdgeConfig: HOUSE_EDGES,
-      recommendations: generateHouseEdgeRecommendations(houseEdgeAnalytics, overallEdge, targetOverallEdge)
-    });
-  } catch (err) {
-    logger.error('Get house edge analytics error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Update house edge configuration (admin only)
-app.post('/api/admin/update-house-edge', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user || !user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-
-    const { game, newEdge } = req.body;
-    
-    if (!game || typeof newEdge !== 'number' || newEdge < 0 || newEdge > 0.5) {
-      return res.status(400).json({ error: 'Invalid house edge configuration' });
-    }
-
-    if (!HOUSE_EDGES.hasOwnProperty(game)) {
-      return res.status(400).json({ error: 'Invalid game type' });
-    }
-
-    const oldEdge = HOUSE_EDGES[game];
-    HOUSE_EDGES[game] = newEdge;
-
-    logger.info(`Admin ${user.username} updated house edge for ${game}: ${oldEdge} -> ${newEdge}`);
-
-    res.json({
-      success: true,
-      game,
-      oldEdge,
-      newEdge,
-      message: `House edge for ${game} updated to ${(newEdge * 100).toFixed(1)}%`
-    });
-  } catch (err) {
-    logger.error('Update house edge error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Generate house edge recommendations
-function generateHouseEdgeRecommendations(analytics, actualOverall, targetOverall) {
-  const recommendations = [];
-  
-  if (actualOverall < targetOverall * 0.8) {
-    recommendations.push('Overall house edge is significantly below target. Consider reviewing game configurations.');
-  }
-  
-  if (actualOverall > targetOverall * 1.2) {
-    recommendations.push('House edge may be too high, potentially affecting player retention.');
-  }
-  
-  for (const [game, stats] of Object.entries(analytics)) {
-    if (stats.efficiency < 70 && stats.totalGames > 100) {
-      recommendations.push(`${game} house edge is underperforming. Actual: ${stats.actualEdge.toFixed(2)}%, Target: ${(HOUSE_EDGES[game] * 100).toFixed(1)}%`);
-    }
-    
-    if (stats.efficiency > 130 && stats.totalGames > 100) {
-      recommendations.push(`${game} house edge may be too aggressive. Consider reducing from ${(HOUSE_EDGES[game] * 100).toFixed(1)}%`);
-    }
-  }
-  
-  if (recommendations.length === 0) {
-    recommendations.push('House edge performance is within expected parameters.');
-  }
-  
-  return recommendations;
-}// BULLETPROOF webhook handler with enhanced duplicate prevention
+});// BULLETPROOF webhook handler with enhanced duplicate prevention
 app.post('/api/payment/webhook', async (req, res) => {
   const startTime = Date.now();
   
@@ -3817,61 +3228,25 @@ app.get('/api/referral/stats', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Initialize referral stats if not exists
-    if (!user.referralStats) {
-      user.referralStats = {
-        totalReferred: 0,
-        totalCommission: 0,
-        pendingCommission: 0,
-        lifetimeWagered: 0
-      };
-    }
-
-    // Get referred users with updated data
+    // Get referred users
     const referredUsers = await User.find({ referredBy: req.userId })
       .select('username totalWagered createdAt')
       .lean();
 
-    // Update referral count
-    user.referralStats.totalReferred = referredUsers.length;
-
-    // Ensure referrals array exists and is updated
-    if (!user.referrals) {
-      user.referrals = [];
-    }
-
-    // Update referrals array with current data
-    for (const refUser of referredUsers) {
-      let existingRef = user.referrals.find(r => r.userId.toString() === refUser._id.toString());
-      if (!existingRef) {
-        user.referrals.push({
-          userId: refUser._id,
-          username: refUser.username,
-          dateReferred: refUser.createdAt,
-          totalWagered: refUser.totalWagered || 0,
-          commissionEarned: (refUser.totalWagered || 0) * 0.05
-        });
-      } else {
-        existingRef.totalWagered = refUser.totalWagered || 0;
-        existingRef.commissionEarned = (refUser.totalWagered || 0) * 0.05;
-      }
-    }
-
-    await user.save();
+    // Calculate total earnings and pending rewards
+    const totalEarnings = user.referralEarnings || 0;
+    const pendingRewards = 0; // This would be calculated from pending referral rewards
 
     res.json({
-      referralCode: user.referralCode || '',
-      totalReferrals: user.referralStats.totalReferred,
-      totalEarnings: user.referralStats.totalCommission || 0,
-      pendingRewards: user.referralStats.pendingCommission || 0,
-      lifetimeWagered: user.referralStats.lifetimeWagered || 0,
-      referralEarnings: user.referralStats.totalCommission || 0,
-      referredUsers: user.referrals.map(ref => ({
+      totalReferrals: user.referralCount || 0,
+      totalEarnings,
+      pendingRewards,
+      referralEarnings: totalEarnings,
+      referredUsers: referredUsers.map(ref => ({
         username: ref.username,
         totalWagered: ref.totalWagered || 0,
-        commission: ref.commissionEarned || 0,
-        joinedAt: ref.dateReferred,
-        isActive: ref.totalWagered > 0
+        commission: ((ref.totalWagered || 0) * REFERRAL_REWARD_PERCENT / 100).toFixed(2),
+        joinedAt: ref.createdAt
       }))
     });
   } catch (err) {
@@ -3880,54 +3255,16 @@ app.get('/api/referral/stats', authMiddleware, async (req, res) => {
   }
 });
 
-// Process referral rewards (claim pending commissions)
+// Process referral rewards (admin function but can be called by users)
 app.post('/api/referral/process-rewards', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    // Initialize referral stats if not exists
-    if (!user.referralStats) {
-      user.referralStats = {
-        totalReferred: 0,
-        totalCommission: 0,
-        pendingCommission: 0,
-        lifetimeWagered: 0
-      };
-    }
-    
-    const pendingAmount = user.referralStats.pendingCommission || 0;
-    
-    if (pendingAmount <= 0) {
-      return res.status(400).json({ error: 'No pending referral rewards to claim' });
-    }
-    
-    // Add pending commission to user balance
-    user.balance += pendingAmount;
-    
-    // Clear pending commission
-    user.referralStats.pendingCommission = 0;
-    
-    await user.save();
-    
-    // Emit balance update
-    io.to(`user-${req.userId}`).emit('balance_update', {
-      newBalance: user.balance,
-      change: pendingAmount,
-      reason: 'referral_claim'
-    });
-    
-    logger.info(`User ${user.username} claimed referral rewards: $${pendingAmount.toFixed(2)}`);
-    
+    // This would process pending referral rewards
+    // For now, just return success with 0 rewards
     res.json({
       success: true,
-      totalRewards: pendingAmount,
-      newBalance: user.balance,
-      message: 'Referral rewards claimed successfully'
+      totalRewards: 0,
+      message: 'No pending rewards to process'
     });
-    
   } catch (err) {
     logger.error('Process referral rewards error:', err);
     res.status(500).json({ error: 'Server error' });
