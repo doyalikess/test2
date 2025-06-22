@@ -1470,6 +1470,31 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
     logger.error('Error fetching wagering status:', err);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// Get wager requirement status (alternative endpoint that Dashboard may call)
+app.get('/api/user/wager-requirement', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const wagerStatus = user.getWagerRequirementStatus ? user.getWagerRequirementStatus() : {
+      totalRequired: 0,
+      totalWagered: 0,
+      remaining: 0,
+      percentage: 100,
+      canWithdraw: true,
+      fromDeposits: 0,
+      fromTips: 0
+    };
+    
+    res.json(wagerStatus);
+  } catch (err) {
+    logger.error('Get wager requirement error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });// Signup
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password, referralCode } = req.body;
@@ -1626,7 +1651,8 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     res.json({
-      _id: user._id,  // ✅ THIS LINE
+      id: user._id.toString(),  // Add id field for React compatibility
+      _id: user._id,  // Keep _id for backward compatibility
       username: user.username,
       balance: user.balance,
       referralCode: user.referralCode,
@@ -1639,7 +1665,10 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
       totalProfit: user.totalProfit,
       highestWin: user.highestWin,
       createdAt: user.createdAt,
-      isAdmin: user.isAdmin || false
+      isAdmin: user.isAdmin || false,
+      level: user.level,
+      unwageredAmount: user.unwageredAmount,
+      wageringProgress: user.wageringProgress
     });
   } catch (err) {
     logger.error('Get user info error:', err);
@@ -2107,6 +2136,158 @@ app.get('/api/user/cases', authMiddleware, async (req, res) => {
     logger.error('Error fetching user cases:', err);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// Get user level information
+app.get('/api/user/level', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Update user level based on total wagering
+    updateUserLevel(user);
+    await user.save();
+
+    res.json({
+      userLevel: user.level || {
+        current: 1,
+        name: 'Rookie',
+        color: '#a9b1d6',
+        progress: 0,
+        totalWagered: user.totalWagered || 0
+      },
+      levels: USER_LEVELS,
+      totalWagered: user.totalWagered || 0
+    });
+  } catch (err) {
+    logger.error('Get user level error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Send tip to another user
+app.post('/api/user/tip', authMiddleware, async (req, res) => {
+  try {
+    const { recipientUsername, amount } = req.body;
+    
+    if (!recipientUsername || !amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid tip data' });
+    }
+
+    const sender = await User.findById(req.userId);
+    if (!sender) {
+      return res.status(404).json({ error: 'Sender not found' });
+    }
+
+    if (sender.balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+
+    const recipient = await User.findOne({ username: recipientUsername });
+    if (!recipient) {
+      return res.status(404).json({ error: 'Recipient not found' });
+    }
+
+    if (sender._id.toString() === recipient._id.toString()) {
+      return res.status(400).json({ error: 'Cannot tip yourself' });
+    }
+
+    // Process the tip
+    sender.balance -= amount;
+    recipient.balance += amount;
+
+    // Save both users
+    await sender.save();
+    await recipient.save();
+
+    // Create tip record
+    try {
+      const Tip = require('./models/tip');
+      await new Tip({
+        fromUser: sender._id,
+        toUser: recipient._id,
+        amount,
+        createdAt: new Date()
+      }).save();
+    } catch (tipError) {
+      logger.error('Error creating tip record:', tipError);
+      // Continue even if tip record fails
+    }
+
+    res.json({
+      success: true,
+      balance: sender.balance,
+      message: `Successfully tipped $${amount.toFixed(2)} to ${recipientUsername}`
+    });
+  } catch (err) {
+    logger.error('Tip error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Open a case
+app.post('/api/user/open-case/:caseType', authMiddleware, async (req, res) => {
+  try {
+    const { caseType } = req.params;
+    
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if user has cases
+    const userCaseCount = user.caseInventory?.get(caseType) || 0;
+    if (userCaseCount <= 0) {
+      return res.status(400).json({ error: 'No cases of this type available' });
+    }
+
+    // Get case data from our case system
+    const caseData = CASE_TYPES[caseType];
+    if (!caseData) {
+      return res.status(400).json({ error: 'Invalid case type' });
+    }
+
+    // Open the case and get item
+    const item = openCase(caseType);
+    
+    // Update user inventory and balance
+    user.caseInventory.set(caseType, userCaseCount - 1);
+    user.balance += item.value;
+
+    await user.save();
+
+    res.json({
+      success: true,
+      item: {
+        name: item.name,
+        value: item.value,
+        rarity: item.rarity,
+        color: item.color,
+        emoji: '🎁' // Default emoji
+      },
+      newBalance: user.balance,
+      remainingCases: userCaseCount - 1
+    });
+  } catch (err) {
+    logger.error('Open case error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get case history
+app.get('/api/user/case-history', authMiddleware, async (req, res) => {
+  try {
+    // For now, return empty array since we don't have case history model
+    // This can be implemented later with a proper CaseHistory model
+    res.json({
+      history: []
+    });
+  } catch (err) {
+    logger.error('Get case history error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });// BULLETPROOF webhook handler with enhanced duplicate prevention
 app.post('/api/payment/webhook', async (req, res) => {
   const startTime = Date.now();
@@ -2493,6 +2674,57 @@ app.post('/api/payment/webhook-test', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     logger.error('Test webhook error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get referral statistics
+app.get('/api/referral/stats', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Get referred users
+    const referredUsers = await User.find({ referredBy: req.userId })
+      .select('username totalWagered createdAt')
+      .lean();
+
+    // Calculate total earnings and pending rewards
+    const totalEarnings = user.referralEarnings || 0;
+    const pendingRewards = 0; // This would be calculated from pending referral rewards
+
+    res.json({
+      totalReferrals: user.referralCount || 0,
+      totalEarnings,
+      pendingRewards,
+      referralEarnings: totalEarnings,
+      referredUsers: referredUsers.map(ref => ({
+        username: ref.username,
+        totalWagered: ref.totalWagered || 0,
+        commission: ((ref.totalWagered || 0) * REFERRAL_REWARD_PERCENT / 100).toFixed(2),
+        joinedAt: ref.createdAt
+      }))
+    });
+  } catch (err) {
+    logger.error('Get referral stats error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Process referral rewards (admin function but can be called by users)
+app.post('/api/referral/process-rewards', authMiddleware, async (req, res) => {
+  try {
+    // This would process pending referral rewards
+    // For now, just return success with 0 rewards
+    res.json({
+      success: true,
+      totalRewards: 0,
+      message: 'No pending rewards to process'
+    });
+  } catch (err) {
+    logger.error('Process referral rewards error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
