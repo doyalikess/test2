@@ -1852,32 +1852,41 @@ app.post('/api/user/update-email', authMiddleware, async (req, res) => {
   }
 });
 
-// Password Reset Endpoints
-
 // Request password reset
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     
+    console.log('🔍 Forgot password request for email:', email);
+    
     if (!email) {
+      console.log('❌ No email provided');
       return res.status(400).json({ error: 'Email address required' });
     }
 
     const user = await User.findOne({ email });
+    console.log('🔍 User found:', user ? user.username : 'No user found');
+    
     if (!user) {
       // Don't reveal whether email exists
+      console.log('⚠️ No user found with that email');
       return res.json({ message: 'If the email exists, a reset link has been sent' });
     }
 
     // Generate reset token
     const resetToken = generateResetToken();
+    console.log('🔍 Generated reset token:', resetToken);
+    
     user.resetPasswordToken = resetToken;
     user.resetPasswordExpires = new Date(Date.now() + 1 * 60 * 60 * 1000); // 1 hour
     
     await user.save();
+    console.log('🔍 User saved with reset token');
 
     // Send reset email
     const resetUrl = `${FRONTEND_URL}/reset-password?token=${resetToken}`;
+    console.log('🔍 Reset URL:', resetUrl);
+    
     const emailSent = await sendEmail(
       user.email,
       'Password Reset Request',
@@ -1890,12 +1899,15 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       `
     );
 
+    console.log('🔍 Email send result:', emailSent);
+
     if (emailSent) {
       res.json({ message: 'Password reset email sent successfully' });
     } else {
       res.status(500).json({ error: 'Failed to send reset email' });
     }
   } catch (err) {
+    console.log('❌ Forgot password error:', err);
     logger.error('Forgot password error:', err);
     res.status(500).json({ error: 'Server error' });
   }
