@@ -22,8 +22,6 @@ const cron = require('node-cron');
 const ReferralReward = require('./models/referralReward');
 
 
-const ReferralReward = require('./models/referralReward');
-// <-- ADD THE RESEND CODE HERE -->
 
 
 
