@@ -11,6 +11,59 @@ const UserSchema = new mongoose.Schema({
     unique: true, 
     required: true 
   },
+  
+  // NEW: Email and verification fields
+  email: { 
+    type: String,
+    sparse: true // Allows multiple null values
+  },
+  emailVerified: { 
+    type: Boolean, 
+    default: false 
+  },
+  emailVerificationToken: String,
+  emailVerificationExpires: Date,
+  
+  // NEW: Password reset fields
+  resetPasswordToken: String,
+  resetPasswordExpires: Date,
+  
+  // NEW: Security fields
+  twoFactorSecret: String,
+  twoFactorEnabled: { type: Boolean, default: false },
+  
+  // NEW: Notification preferences
+  notificationPreferences: {
+    email: { type: Boolean, default: true },
+    push: { type: Boolean, default: true },
+    deposits: { type: Boolean, default: true },
+    withdrawals: { type: Boolean, default: true },
+    wins: { type: Boolean, default: true },
+    promotions: { type: Boolean, default: true }
+  },
+  
+  // NEW: Session and security tracking
+  registrationIP: String,
+  lastLoginIP: String,
+  ipHistory: [{
+    ip: String,
+    timestamp: { type: Date, default: Date.now }
+  }],
+  
+  // NEW: Admin and roles
+  isAdmin: { type: Boolean, default: false },
+  roles: [String],
+  
+  // NEW: Processed payments tracking
+  processedPayments: [{
+    paymentId: String,
+    orderKey: String,
+    status: String,
+    amount: Number,
+    createdAt: { type: Date, default: Date.now },
+    processingTime: Number
+  }],
+  
   passwordHash: { 
     type: String, 
     required: true 
@@ -19,16 +72,26 @@ const UserSchema = new mongoose.Schema({
     type: Number, 
     default: 0 
   },
+  
+  // NEW: Wagering requirements
+  unwageredAmount: { type: Number, default: 0 },
+  wageringProgress: {
+    totalDeposited: { type: Number, default: 0 },
+    totalWageredSinceDeposit: { type: Number, default: 0 }
+  },
+  
   // Crypto deposit addresses
   cryptoAddresses: {
     bitcoin: { type: String, default: null },
     ethereum: { type: String, default: null }
   },
+  
   // Store webhook IDs for each address (to manage/delete later if needed)
   webhooks: {
     bitcoin: { type: String, default: null },
     ethereum: { type: String, default: null }
   },
+  
   // Referral System Fields
   referralCode: { 
     type: String, 
@@ -51,6 +114,7 @@ const UserSchema = new mongoose.Schema({
       type: Date 
     }
   },
+  
   // Wagering Stats
   totalWagered: { 
     type: Number, 
@@ -60,6 +124,7 @@ const UserSchema = new mongoose.Schema({
     type: Number, 
     default: 0 
   },
+  
   // Track the number of referred users
   referralCount: {
     type: Number,
@@ -69,6 +134,7 @@ const UserSchema = new mongoose.Schema({
     type: Boolean, 
     default: false 
   },
+  
   // Game stats
   gamesPlayed: {
     type: Number,
@@ -91,7 +157,36 @@ const UserSchema = new mongoose.Schema({
     default: 0
   },
   
-  // Free coins tracking (NEW)
+  // Game stats by type (NEW)
+  gameStats: {
+    type: Map,
+    of: {
+      totalWagered: { type: Number, default: 0 },
+      totalGames: { type: Number, default: 0 },
+      totalProfit: { type: Number, default: 0 },
+      recentGames: [{
+        amount: Number,
+        multiplier: Number,
+        won: Boolean,
+        profit: Number,
+        roll: Number,
+        chance: Number,
+        timestamp: { type: Date, default: Date.now }
+      }]
+    },
+    default: new Map()
+  },
+  
+  // Recent games tracking (NEW)
+  recentGames: [{
+    gameType: String,
+    amount: Number,
+    outcome: String,
+    profit: Number,
+    timestamp: { type: Date, default: Date.now }
+  }],
+  
+  // Free coins tracking
   freeCoinsClaimedAt: {
     type: Date,
     default: null
@@ -103,7 +198,7 @@ const UserSchema = new mongoose.Schema({
     ipAddress: String
   }],
   
-  // Case system (NEW)
+  // Case system
   caseInventory: {
     type: Map,
     of: Number,
@@ -124,7 +219,7 @@ const UserSchema = new mongoose.Schema({
     balanceAfter: Number
   }],
   
-  // Level system enhancements (NEW)
+  // Level system enhancements
   level: {
     current: { type: Number, default: 1 },
     name: String,
@@ -136,6 +231,25 @@ const UserSchema = new mongoose.Schema({
     totalWagered: { type: Number, default: 0 }
   },
   
+  // Deposit requests tracking (NEW)
+  depositRequests: [{
+    depositId: String,
+    amount: Number,
+    currency: String,
+    cryptoAmount: Number,
+    status: { type: String, default: 'pending' },
+    createdAt: { type: Date, default: Date.now }
+  }],
+  
+  // Notification history (NEW)
+  notificationHistory: [{
+    title: String,
+    message: String,
+    type: String,
+    read: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now }
+  }],
+  
   // Timestamps
   createdAt: { 
     type: Date, 
@@ -146,7 +260,11 @@ const UserSchema = new mongoose.Schema({
   },
   lastLoginTime: {
     type: Date
-  }
+  },
+  
+  // Profile fields (NEW)
+  avatar: String,
+  displayName: String
 });
 
 // Password hashing method
@@ -164,13 +282,57 @@ UserSchema.methods.getReferralLink = function() {
   return `${process.env.BASE_URL || 'https://dgenrand0.vercel.app'}/signup?ref=${this.referralCode}`;
 };
 
+// NEW: Record wager progress for wagering requirements
+UserSchema.methods.recordWagerProgress = function(amount) {
+  if (!this.wageringProgress) {
+    this.wageringProgress = {
+      totalDeposited: this.unwageredAmount || 0,
+      totalWageredSinceDeposit: 0
+    };
+  }
+  
+  this.wageringProgress.totalWageredSinceDeposit += amount;
+  
+  // Check if wagering requirement is met
+  const requiredWagering = this.wageringProgress.totalDeposited * (process.env.WAGER_REQUIREMENT_MULTIPLIER || 1);
+  if (this.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
+    this.unwageredAmount = 0;
+    this.wageringProgress = {
+      totalDeposited: 0,
+      totalWageredSinceDeposit: 0
+    };
+  } else {
+    const remaining = requiredWagering - this.wageringProgress.totalWageredSinceDeposit;
+    this.unwageredAmount = remaining;
+  }
+};
+
+// NEW: Get wagering requirement status
+UserSchema.methods.getWagerRequirementStatus = function() {
+  const requirementMultiplier = process.env.WAGER_REQUIREMENT_MULTIPLIER || 1;
+  const totalRequired = this.wageringProgress?.totalDeposited * requirementMultiplier || 0;
+  const totalWagered = this.wageringProgress?.totalWageredSinceDeposit || 0;
+  const remaining = Math.max(0, totalRequired - totalWagered);
+  const percentage = totalRequired > 0 ? Math.min(100, (totalWagered / totalRequired) * 100) : 100;
+  
+  return {
+    totalRequired,
+    totalWagered,
+    remaining,
+    percentage,
+    canWithdraw: remaining <= 0,
+    fromDeposits: this.wageringProgress?.totalDeposited || 0,
+    fromTips: 0
+  };
+};
+
 // Track a new wager
 UserSchema.methods.trackWager = async function(amount, gameType) {
   this.totalWagered += amount;
   this.gamesPlayed += 1;
   this.lastWagerTime = new Date();
   
-  // Update level progress (NEW)
+  // Update level progress
   if (!this.level) {
     this.level = {
       current: 1,
@@ -178,6 +340,9 @@ UserSchema.methods.trackWager = async function(amount, gameType) {
     };
   }
   this.level.totalWagered += amount;
+  
+  // Record wager progress for requirements
+  this.recordWagerProgress(amount);
   
   // If user was referred, update referrer's earnings
   if (this.referredBy) {
@@ -253,12 +418,12 @@ UserSchema.methods.getReferralStats = async function() {
   };
 };
 
-// Check if user can claim free coins (NEW)
+// Check if user can claim free coins
 UserSchema.methods.canClaimFreeCoins = function() {
   return !this.freeCoinsClaimedAt;
 };
 
-// Claim free coins - one-time only (NEW)
+// Claim free coins - one-time only
 UserSchema.methods.claimFreeCoins = async function(ipAddress = null) {
   if (this.freeCoinsClaimedAt) {
     throw new Error('Free coins already claimed');
@@ -299,7 +464,7 @@ UserSchema.methods.claimFreeCoins = async function(ipAddress = null) {
   };
 };
 
-// Award cases based on level (NEW)
+// Award cases based on level
 UserSchema.methods.awardLevelUpCases = async function(newLevel) {
   const getCaseTypeForLevel = (level) => {
     if (level >= 20) return 'level_3';
@@ -341,7 +506,7 @@ UserSchema.methods.awardLevelUpCases = async function(newLevel) {
   };
 };
 
-// Open a case and get random item (NEW)
+// Open a case and get random item
 UserSchema.methods.openCase = async function(caseType) {
   // Check if user has this case type in inventory
   if (!this.caseInventory) {
@@ -498,6 +663,34 @@ UserSchema.statics.applyReferralCode = async function(userId, referralCode) {
   return { user, referrer };
 };
 
+// NEW: Add email to existing users
+UserSchema.statics.addEmailToUser = async function(username, email) {
+  const user = await this.findOne({ username });
+  if (user) {
+    user.email = email;
+    user.emailVerified = true; // Mark as verified since they're existing users
+    await user.save();
+    return user;
+  }
+  throw new Error('User not found');
+};
+
+// NEW: Find user by reset token
+UserSchema.statics.findByResetToken = function(token) {
+  return this.findOne({
+    resetPasswordToken: token,
+    resetPasswordExpires: { $gt: Date.now() }
+  });
+};
+
+// NEW: Find user by email verification token
+UserSchema.statics.findByEmailVerificationToken = function(token) {
+  return this.findOne({
+    emailVerificationToken: token,
+    emailVerificationExpires: { $gt: Date.now() }
+  });
+};
+
 // Indexes for better performance
 UserSchema.index({ referralCode: 1 });
 UserSchema.index({ referredBy: 1 });
@@ -509,5 +702,8 @@ UserSchema.index({ 'cryptoAddresses.bitcoin': 1 });
 UserSchema.index({ 'cryptoAddresses.ethereum': 1 });
 UserSchema.index({ freeCoinsClaimedAt: 1 });
 UserSchema.index({ 'level.current': -1 });
+UserSchema.index({ email: 1 }); // NEW: Index for email
+UserSchema.index({ resetPasswordToken: 1 }); // NEW: Index for reset tokens
+UserSchema.index({ emailVerificationToken: 1 }); // NEW: Index for email verification
 
 module.exports = mongoose.models.User || mongoose.model('User', UserSchema);
