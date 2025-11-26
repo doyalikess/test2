@@ -2655,7 +2655,7 @@ app.post('/api/auth/signup', async (req, res) => {
     user.referralCode = crypto.randomBytes(3).toString('hex').toUpperCase();
     
     // Welcome bonus
-    user.balance = 0.05; // $0.05 welcome bonus
+    user.balance = 0.00; // $0.00 welcome bonus
     
     // Record IP address for security
     user.registrationIP = ip;
