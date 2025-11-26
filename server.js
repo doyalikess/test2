@@ -1389,21 +1389,21 @@ setInterval(() => {
   const timeoutThreshold = 10 * 60 * 1000; // 10 minutes
   
   // Clean up mines games
-  for (const [userId, game] of minesGames.entries()) {
-    if (currentTime - game.startTime > timeoutThreshold) {
-      minesGames.delete(userId);
-      logger.info(`Auto-cleaned inactive mines game for user ${userId}`);
-    }
-  }
-  
-  // Clean up limbo games
-  for (const [userId, game] of limboGames.entries()) {
-    if (currentTime - game.startTime > timeoutThreshold) {
-      limboGames.delete(userId);
-      logger.info(`Auto-cleaned inactive limbo game for user ${userId}`);
-    }
-  }
-}, 5 * 60 * 1000); // Run every 5 minutes// CORS middleware for REST API requests
+      for (const [userId, game] of minesGames.entries()) {
+        if (currentTime - game.startTime > timeoutThreshold) {
+          minesGames.delete(userId);
+          logger.info(`Auto-cleaned inactive mines game for user ${userId}`);
+        }
+      }
+      
+      // Clean up limbo games
+      for (const [userId, game] of limboGames.entries()) {
+        if (currentTime - game.startTime > timeoutThreshold) {
+          limboGames.delete(userId);
+          logger.info(`Auto-cleaned inactive limbo game for user ${userId}`);
+        }
+      }
+    }, 5 * 60 * 1000); // Run every 5 minutes// CORS middleware for REST API requests
 app.use(
   cors({
     origin: ['http://localhost:3000', FRONTEND_URL],
@@ -2359,8 +2359,8 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
   try {
     const { recipientUsername, amount } = req.body;
     
-    if (!recipientUsername || !amount || amount <= 0) {
-      return res.status(400).json({ error: 'Invalid tip data' });
+    if (!recipientUsername || !amount || amount < 1) {
+      return res.status(400).json({ error: 'Invalid tip data. Minimum tip amount is $1' });
     }
 
     const sender = await User.findById(req.userId);
@@ -3837,3 +3837,4 @@ const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   logger.info(`🚀 Server running on port ${PORT}`);
 });
+[file content end]
