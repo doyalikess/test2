@@ -35,6 +35,71 @@ const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || crypto.rand
 const CALLBACK_URL = 'https://test2-e7gb.onrender.com/api/payment/webhook';
 const FRONTEND_URL = 'http://localhost:3000';
 
+// Reset password with token
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    
+    console.log('🔍 Reset password request received');
+    console.log('🔍 Token:', token);
+    console.log('🔍 New password length:', newPassword?.length);
+    
+    if (!token || !newPassword) {
+      console.log('❌ Missing token or new password');
+      return res.status(400).json({ error: 'Token and new password required' });
+    }
+
+    if (newPassword.length < 8) {
+      console.log('❌ Password too short');
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+
+    // Find user by reset token
+    console.log('🔍 Searching for user with reset token...');
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: new Date() }
+    });
+
+    console.log('🔍 User found:', user ? user.username : 'No user found');
+    
+    if (!user) {
+      console.log('❌ No valid user found with this token');
+      console.log('❌ Token might be expired or invalid');
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    console.log('🔍 Token expires at:', user.resetPasswordExpires);
+    console.log('🔍 Current time:', new Date());
+    
+    // Set new password
+    console.log('🔍 Setting new password for user:', user.username);
+    await user.setPassword(newPassword);
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    
+    await user.save();
+    console.log('✅ Password reset successfully for user:', user.username);
+
+    // Send confirmation email
+    await sendEmail(
+      user.email,
+      'Password Reset Successful',
+      `
+        <h2>Password Reset Successful</h2>
+        <p>Your password has been successfully reset.</p>
+        <p>If you didn't make this change, please contact support immediately.</p>
+      `
+    );
+
+    res.json({ message: 'Password reset successfully' });
+  } catch (err) {
+    console.log('❌ Reset password error:', err);
+    logger.error('Reset password error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Email configuration
 const EMAIL_CONFIG = {
   service: process.env.EMAIL_SERVICE || 'gmail',
