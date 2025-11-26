@@ -2673,10 +2673,10 @@ app.post('/api/auth/signup', async (req, res) => {
       const verificationUrl = `${FRONTEND_URL}/verify-email?token=${verificationToken}`;
       await sendEmail(
         email,
-        'Welcome to Our Casino!',
+        'Welcome to RustyCoin!',
         `
           <h2>Welcome to Our Casino, ${username}!</h2>
-          <p>Your account has been created successfully with a $0.05 welcome bonus!</p>
+          <p>Your account has been created successfully with a 5% deposit bonus!</p>
           <p>Please verify your email address to unlock all features:</p>
           <a href="${verificationUrl}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Verify Email</a>
           <p>This link will expire in 24 hours.</p>
