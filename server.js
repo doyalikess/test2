@@ -24,34 +24,7 @@ const ReferralReward = require('./models/referralReward');
 
 const ReferralReward = require('./models/referralReward');
 // <-- ADD THE RESEND CODE HERE -->
-// Resend.com email configuration
-const { Resend } = require('resend');
-const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Email sending helper for Resend
-async function sendEmail(to, subject, html) {
-  try {
-    const { data, error } = await resend.emails.send({
-      from: 'Casino App <notdoyalike@gmail.com>',
-      to: [to],
-      subject: subject,
-      html: html,
-    });
-
-    if (error) {
-      logger.error('Resend email error:', error);
-      return false;
-    }
-
-    logger.info(`✅ Email sent to ${to}`);
-    return true;
-  } catch (error) {
-    logger.error('Error sending email:', error);
-    return false;
-  }
-}
-
-console.log('📧 Resend email system loaded');
 
 
 // Set referral reward percentage
@@ -724,19 +697,25 @@ function trackLoginAttempt(ip, success, username) {
 // Email sending helper
 async function sendEmail(to, subject, html) {
   try {
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to,
-      subject,
-      html
-    };
+    const { Resend } = require('resend');
+    const resend = new Resend(process.env.RESEND_API_KEY);
     
-    await emailTransporter.sendMail(mailOptions);
-    logger.info(`Email sent to ${to}`);
+    const { data, error } = await resend.emails.send({
+      from: 'Casino App <notdoyalike@gmail.com>',
+      to: [to],
+      subject: subject,
+      html: html,
+    });
+
+    if (error) {
+      logger.error('Resend email error:', error);
+      return false;
+    }
+
+    logger.info(`✅ Email sent to ${to}`);
     return true;
   } catch (error) {
-    logger.error('Error sending email:', error.message);
-    // Don't throw error - just log it and continue
+    logger.error('Error sending email:', error);
     return false;
   }
 }
