@@ -1901,56 +1901,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }
 });
 
-// Reset password with token
-app.post('/api/auth/reset-password', async (req, res) => {
-  try {
-    const { token, newPassword } = req.body;
-    
-    if (!token || !newPassword) {
-      return res.status(400).json({ error: 'Token and new password required' });
-    }
-
-    if (newPassword.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
-    }
-
-    const user = await User.findOne({
-      resetPasswordToken: token,
-      resetPasswordExpires: { $gt: new Date() }
-    });
-
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid or expired reset token' });
-    }
-
-    // Set new password
-    await user.setPassword(newPassword);
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpires = undefined;
-    
-    await user.save();
-
-    // Send confirmation email
-    await sendEmail(
-      user.email,
-      'Password Reset Successful',
-      `
-        <h2>Password Reset Successful</h2>
-        <p>Your password has been successfully reset.</p>
-        <p>If you didn't make this change, please contact support immediately.</p>
-      `
-    );
-
-    // Invalidate all existing sessions
-    activeSessions.delete(user._id.toString());
-
-    res.json({ message: 'Password reset successfully' });
-  } catch (err) {
-    logger.error('Reset password error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
 // Two-Factor Authentication Endpoints
 
 // Enable 2FA
