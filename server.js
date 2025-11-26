@@ -10,6 +10,9 @@ const crypto = require('crypto');
 const axios = require('axios');
 const http = require('http');
 const { Server } = require('socket.io');
+const nodemailer = require('nodemailer');
+const speakeasy = require('speakeasy');
+const QRCode = require('qrcode');
 
 const upgraderRouter = require('./routes/upgrader');
 const referralRouter = require('./routes/referral'); // New import for referral routes
@@ -20,7 +23,7 @@ const ReferralReward = require('./models/referralReward');
 
 
 // Set referral reward percentage
-const REFERRAL_REWARD_PERCENT = 1; // 1% of referred user's wagers
+const REFERRAL_REWARD_PERCENT = 0.1; // 0.1% of referred user's wagers
 
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
@@ -28,6 +31,30 @@ const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || 'H5RMGFD-DDJMKFB-
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || crypto.randomBytes(16).toString('hex');
 const CALLBACK_URL = 'https://test2-e7gb.onrender.com/api/payment/webhook';
 const FRONTEND_URL = 'http://localhost:3000';
+
+// Email configuration
+const EMAIL_CONFIG = {
+  service: process.env.EMAIL_SERVICE || 'gmail',
+  host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+  port: process.env.EMAIL_PORT || 587,
+  secure: process.env.EMAIL_SECURE === 'true' || false,
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+};
+
+// Create email transporter
+const emailTransporter = nodemailer.createTransporter(EMAIL_CONFIG);
+
+// Verify email configuration
+emailTransporter.verify((error, success) => {
+  if (error) {
+    console.log('❌ Email configuration error:', error);
+  } else {
+    console.log('✅ Email server is ready to send messages');
+  }
+});
 
 // Create custom logger
 const logger = {
@@ -41,6 +68,49 @@ const logger = {
     console.error(`[ERROR] ${message}`, ...args);
   }
 };
+
+// Session management
+const activeSessions = new Map();
+
+// Analytics tracking
+const analytics = {
+  dailyStats: {
+    date: new Date().toISOString().split('T')[0],
+    registrations: 0,
+    logins: 0,
+    deposits: 0,
+    withdrawals: 0,
+    totalWagered: 0,
+    gamesPlayed: 0
+  },
+  userActivity: new Map(),
+  gameStats: {
+    coinflip: { plays: 0, wagered: 0, won: 0 },
+    upgrader: { plays: 0, wagered: 0, won: 0 },
+    mines: { plays: 0, wagered: 0, won: 0 },
+    limbo: { plays: 0, wagered: 0, won: 0 },
+    airdrop: { plays: 0, wagered: 0, won: 0 },
+    jackpot: { plays: 0, wagered: 0, won: 0 }
+  }
+};
+
+// Reset daily stats at midnight
+cron.schedule('0 0 * * *', () => {
+  const today = new Date().toISOString().split('T')[0];
+  analytics.dailyStats = {
+    date: today,
+    registrations: 0,
+    logins: 0,
+    deposits: 0,
+    withdrawals: 0,
+    totalWagered: 0,
+    gamesPlayed: 0
+  };
+  logger.info('📊 Daily analytics reset');
+});
+
+// Push notification system
+const pushSubscriptions = new Map();
 
 // Custom rate limiter implementation
 class RateLimiter {
@@ -631,6 +701,112 @@ function trackLoginAttempt(ip, success, username) {
   }
 }
 
+// Email sending helper
+async function sendEmail(to, subject, html) {
+  try {
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to,
+      subject,
+      html
+    };
+    
+    await emailTransporter.sendMail(mailOptions);
+    logger.info(`Email sent to ${to}`);
+    return true;
+  } catch (error) {
+    logger.error('Error sending email:', error);
+    return false;
+  }
+}
+
+// Generate verification token
+function generateVerificationToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// Generate password reset token
+function generateResetToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// Track user session
+function trackUserSession(userId, sessionData) {
+  const userSessions = activeSessions.get(userId) || [];
+  userSessions.push({
+    ...sessionData,
+    createdAt: new Date(),
+    lastActivity: new Date()
+  });
+  
+  // Keep only last 10 sessions per user
+  if (userSessions.length > 10) {
+    userSessions.shift();
+  }
+  
+  activeSessions.set(userId, userSessions);
+}
+
+// Update session activity
+function updateSessionActivity(userId, sessionId) {
+  const userSessions = activeSessions.get(userId);
+  if (userSessions) {
+    const session = userSessions.find(s => s.sessionId === sessionId);
+    if (session) {
+      session.lastActivity = new Date();
+    }
+  }
+}
+
+// Record analytics event
+function recordAnalyticsEvent(eventType, data) {
+  analytics.dailyStats[eventType] = (analytics.dailyStats[eventType] || 0) + 1;
+  
+  if (data.userId) {
+    const userActivity = analytics.userActivity.get(data.userId) || [];
+    userActivity.push({
+      type: eventType,
+      timestamp: new Date(),
+      data
+    });
+    
+    // Keep only last 100 activities per user
+    if (userActivity.length > 100) {
+      userActivity.shift();
+    }
+    
+    analytics.userActivity.set(data.userId, userActivity);
+  }
+  
+  // Track game-specific analytics
+  if (eventType === 'gamesPlayed' && data.gameType) {
+    if (analytics.gameStats[data.gameType]) {
+      analytics.gameStats[data.gameType].plays++;
+      analytics.gameStats[data.gameType].wagered += data.amount || 0;
+      if (data.won) {
+        analytics.gameStats[data.gameType].won++;
+      }
+    }
+  }
+}
+
+// Send push notification
+function sendPushNotification(userId, title, message, data = {}) {
+  const subscriptions = pushSubscriptions.get(userId);
+  if (subscriptions) {
+    subscriptions.forEach(subscription => {
+      // In a real implementation, you would send to a push service
+      // For now, we'll emit via socket
+      io.to(`user-${userId}`).emit('push_notification', {
+        title,
+        message,
+        data,
+        timestamp: new Date()
+      });
+    });
+  }
+}
+
 async function startJackpotGame(io) {
   jackpotGame.isRunning = true;
   io.emit('jackpot_start');
@@ -711,6 +887,30 @@ async function startJackpotGame(io) {
       socket.join(`user-${userId}`);
       socket.userId = userId;
       logger.info(`User ${userId} authenticated and joined their room`);
+    }
+  });
+  
+  // Subscribe to push notifications
+  socket.on('push_subscribe', (subscription) => {
+    if (socket.userId) {
+      const userSubscriptions = pushSubscriptions.get(socket.userId) || new Set();
+      userSubscriptions.add(subscription);
+      pushSubscriptions.set(socket.userId, userSubscriptions);
+      logger.info(`User ${socket.userId} subscribed to push notifications`);
+    }
+  });
+  
+  // Unsubscribe from push notifications
+  socket.on('push_unsubscribe', (subscription) => {
+    if (socket.userId) {
+      const userSubscriptions = pushSubscriptions.get(socket.userId);
+      if (userSubscriptions) {
+        userSubscriptions.delete(subscription);
+        if (userSubscriptions.size === 0) {
+          pushSubscriptions.delete(socket.userId);
+        }
+      }
+      logger.info(`User ${socket.userId} unsubscribed from push notifications`);
     }
   });
   
@@ -1510,6 +1710,704 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// ============================
+// NEW FEATURES START HERE
+// ============================
+
+// Email Verification Endpoints
+
+// Request email verification
+app.post('/api/auth/verify-email/request', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ error: 'Email already verified' });
+    }
+
+    if (!user.email) {
+      return res.status(400).json({ error: 'No email address set' });
+    }
+
+    // Generate verification token
+    const verificationToken = generateVerificationToken();
+    user.emailVerificationToken = verificationToken;
+    user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    
+    await user.save();
+
+    // Send verification email
+    const verificationUrl = `${FRONTEND_URL}/verify-email?token=${verificationToken}`;
+    const emailSent = await sendEmail(
+      user.email,
+      'Verify Your Email Address',
+      `
+        <h2>Email Verification</h2>
+        <p>Please click the link below to verify your email address:</p>
+        <a href="${verificationUrl}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Verify Email</a>
+        <p>This link will expire in 24 hours.</p>
+        <p>If you didn't request this verification, please ignore this email.</p>
+      `
+    );
+
+    if (emailSent) {
+      res.json({ message: 'Verification email sent successfully' });
+    } else {
+      res.status(500).json({ error: 'Failed to send verification email' });
+    }
+  } catch (err) {
+    logger.error('Request email verification error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Verify email
+app.post('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    if (!token) {
+      return res.status(400).json({ error: 'Verification token required' });
+    }
+
+    const user = await User.findOne({
+      emailVerificationToken: token,
+      emailVerificationExpires: { $gt: new Date() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired verification token' });
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save();
+
+    // Send welcome notification
+    sendPushNotification(user._id, 'Email Verified', 'Your email has been successfully verified!');
+
+    res.json({ message: 'Email verified successfully' });
+  } catch (err) {
+    logger.error('Verify email error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update email address
+app.post('/api/user/update-email', authMiddleware, async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ error: 'Email address required' });
+    }
+
+    // Basic email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if email is already used by another user
+    const existingUser = await User.findOne({ email, _id: { $ne: req.userId } });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email address already in use' });
+    }
+
+    user.email = email;
+    user.emailVerified = false; // Require re-verification
+    
+    await user.save();
+
+    // Request new verification
+    const verificationToken = generateVerificationToken();
+    user.emailVerificationToken = verificationToken;
+    user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await user.save();
+
+    // Send verification email
+    const verificationUrl = `${FRONTEND_URL}/verify-email?token=${verificationToken}`;
+    await sendEmail(
+      email,
+      'Verify Your New Email Address',
+      `
+        <h2>Email Verification Required</h2>
+        <p>Please verify your new email address by clicking the link below:</p>
+        <a href="${verificationUrl}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Verify Email</a>
+        <p>This link will expire in 24 hours.</p>
+      `
+    );
+
+    res.json({ message: 'Email updated successfully. Verification email sent.' });
+  } catch (err) {
+    logger.error('Update email error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Password Reset Endpoints
+
+// Request password reset
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ error: 'Email address required' });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      // Don't reveal whether email exists
+      return res.json({ message: 'If the email exists, a reset link has been sent' });
+    }
+
+    // Generate reset token
+    const resetToken = generateResetToken();
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = new Date(Date.now() + 1 * 60 * 60 * 1000); // 1 hour
+    
+    await user.save();
+
+    // Send reset email
+    const resetUrl = `${FRONTEND_URL}/reset-password?token=${resetToken}`;
+    const emailSent = await sendEmail(
+      user.email,
+      'Password Reset Request',
+      `
+        <h2>Password Reset</h2>
+        <p>You requested a password reset. Click the link below to reset your password:</p>
+        <a href="${resetUrl}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Reset Password</a>
+        <p>This link will expire in 1 hour.</p>
+        <p>If you didn't request this reset, please ignore this email.</p>
+      `
+    );
+
+    if (emailSent) {
+      res.json({ message: 'Password reset email sent successfully' });
+    } else {
+      res.status(500).json({ error: 'Failed to send reset email' });
+    }
+  } catch (err) {
+    logger.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Reset password with token
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'Token and new password required' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: new Date() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    // Set new password
+    await user.setPassword(newPassword);
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    
+    await user.save();
+
+    // Send confirmation email
+    await sendEmail(
+      user.email,
+      'Password Reset Successful',
+      `
+        <h2>Password Reset Successful</h2>
+        <p>Your password has been successfully reset.</p>
+        <p>If you didn't make this change, please contact support immediately.</p>
+      `
+    );
+
+    // Invalidate all existing sessions
+    activeSessions.delete(user._id.toString());
+
+    res.json({ message: 'Password reset successfully' });
+  } catch (err) {
+    logger.error('Reset password error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Two-Factor Authentication Endpoints
+
+// Enable 2FA
+app.post('/api/auth/2fa/enable', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA is already enabled' });
+    }
+
+    // Generate secret
+    const secret = speakeasy.generateSecret({
+      name: `CasinoApp (${user.username})`,
+      issuer: 'CasinoApp'
+    });
+
+    user.twoFactorSecret = secret.base32;
+    await user.save();
+
+    // Generate QR code
+    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+
+    res.json({
+      secret: secret.base32,
+      qrCode: qrCodeUrl,
+      message: 'Scan the QR code with your authenticator app'
+    });
+  } catch (err) {
+    logger.error('Enable 2FA error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Verify 2FA setup
+app.post('/api/auth/2fa/verify', authMiddleware, async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    if (!token) {
+      return res.status(400).json({ error: 'Verification token required' });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA is already enabled' });
+    }
+
+    if (!user.twoFactorSecret) {
+      return res.status(400).json({ error: '2FA not set up' });
+    }
+
+    // Verify token
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: token,
+      window: 1 // Allow 30 seconds before and after
+    });
+
+    if (!verified) {
+      return res.status(400).json({ error: 'Invalid verification code' });
+    }
+
+    user.twoFactorEnabled = true;
+    await user.save();
+
+    // Send notification
+    sendPushNotification(user._id, '2FA Enabled', 'Two-factor authentication has been enabled on your account.');
+
+    res.json({ message: '2FA enabled successfully' });
+  } catch (err) {
+    logger.error('Verify 2FA error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Disable 2FA
+app.post('/api/auth/2fa/disable', authMiddleware, async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!user.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+
+    // Verify token if 2FA is enabled
+    if (user.twoFactorEnabled) {
+      if (!token) {
+        return res.status(400).json({ error: 'Verification token required' });
+      }
+
+      const verified = speakeasy.totp.verify({
+        secret: user.twoFactorSecret,
+        encoding: 'base32',
+        token: token,
+        window: 1
+      });
+
+      if (!verified) {
+        return res.status(400).json({ error: 'Invalid verification code' });
+      }
+    }
+
+    user.twoFactorEnabled = false;
+    user.twoFactorSecret = undefined;
+    await user.save();
+
+    // Send notification
+    sendPushNotification(user._id, '2FA Disabled', 'Two-factor authentication has been disabled on your account.');
+
+    res.json({ message: '2FA disabled successfully' });
+  } catch (err) {
+    logger.error('Disable 2FA error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Login with 2FA
+app.post('/api/auth/login-2fa', async (req, res) => {
+  try {
+    const { username, password, token } = req.body;
+    
+    if (!username || !password || !token) {
+      return res.status(400).json({ error: 'Username, password, and 2FA token required' });
+    }
+
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+
+    const valid = await user.validatePassword(password);
+    if (!valid) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+
+    if (!user.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA not enabled for this account' });
+    }
+
+    // Verify 2FA token
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: token,
+      window: 1
+    });
+
+    if (!verified) {
+      return res.status(400).json({ error: 'Invalid 2FA code' });
+    }
+
+    // Track login
+    const ip = req.ip || req.connection.remoteAddress;
+    trackLoginAttempt(ip, true, username);
+    
+    // Update last login
+    user.lastLoginTime = new Date();
+    user.lastLoginIP = ip;
+    await user.save();
+
+    // Track session
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    trackUserSession(user._id, {
+      sessionId,
+      ip,
+      userAgent: req.get('User-Agent'),
+      loginTime: new Date()
+    });
+
+    // Record analytics
+    recordAnalyticsEvent('logins', { userId: user._id });
+
+    const jwtToken = jwt.sign({ 
+      userId: user._id, 
+      username: user.username,
+      sessionId 
+    }, JWT_SECRET, { expiresIn: '7d' });
+
+    res.json({
+      token: jwtToken,
+      user: {
+        id: user._id,
+        username: user.username,
+        balance: user.balance,
+        email: user.email,
+        emailVerified: user.emailVerified,
+        twoFactorEnabled: user.twoFactorEnabled
+      }
+    });
+  } catch (err) {
+    logger.error('2FA login error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Session Management Endpoints
+
+// Get active sessions
+app.get('/api/user/sessions', authMiddleware, async (req, res) => {
+  try {
+    const sessions = activeSessions.get(req.userId) || [];
+    
+    res.json({
+      sessions: sessions.map(session => ({
+        sessionId: session.sessionId,
+        ip: session.ip,
+        userAgent: session.userAgent,
+        loginTime: session.loginTime,
+        lastActivity: session.lastActivity
+      }))
+    });
+  } catch (err) {
+    logger.error('Get sessions error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Revoke session
+app.post('/api/user/sessions/revoke', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID required' });
+    }
+
+    const userSessions = activeSessions.get(req.userId);
+    if (userSessions) {
+      const filteredSessions = userSessions.filter(session => session.sessionId !== sessionId);
+      activeSessions.set(req.userId, filteredSessions);
+    }
+
+    res.json({ message: 'Session revoked successfully' });
+  } catch (err) {
+    logger.error('Revoke session error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Revoke all other sessions
+app.post('/api/user/sessions/revoke-others', authMiddleware, async (req, res) => {
+  try {
+    const currentSessionId = req.headers.authorization?.split(' ')[2]; // Assuming session ID is passed
+    
+    const userSessions = activeSessions.get(req.userId);
+    if (userSessions) {
+      const currentSession = userSessions.find(session => session.sessionId === currentSessionId);
+      activeSessions.set(req.userId, currentSession ? [currentSession] : []);
+    }
+
+    res.json({ message: 'All other sessions revoked successfully' });
+  } catch (err) {
+    logger.error('Revoke other sessions error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Push Notifications Endpoints
+
+// Get notification preferences
+app.get('/api/user/notifications/preferences', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      preferences: user.notificationPreferences || {
+        email: true,
+        push: true,
+        deposits: true,
+        withdrawals: true,
+        wins: true,
+        promotions: true
+      }
+    });
+  } catch (err) {
+    logger.error('Get notification preferences error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update notification preferences
+app.post('/api/user/notifications/preferences', authMiddleware, async (req, res) => {
+  try {
+    const { preferences } = req.body;
+    
+    if (!preferences) {
+      return res.status(400).json({ error: 'Preferences object required' });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    user.notificationPreferences = {
+      ...user.notificationPreferences,
+      ...preferences
+    };
+    
+    await user.save();
+
+    res.json({ 
+      message: 'Notification preferences updated successfully',
+      preferences: user.notificationPreferences
+    });
+  } catch (err) {
+    logger.error('Update notification preferences error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get notification history
+app.get('/api/user/notifications/history', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      notifications: user.notificationHistory || []
+    });
+  } catch (err) {
+    logger.error('Get notification history error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Mark notification as read
+app.post('/api/user/notifications/mark-read', authMiddleware, async (req, res) => {
+  try {
+    const { notificationId } = req.body;
+    
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.notificationHistory) {
+      const notification = user.notificationHistory.find(n => n._id.toString() === notificationId);
+      if (notification) {
+        notification.read = true;
+        await user.save();
+      }
+    }
+
+    res.json({ message: 'Notification marked as read' });
+  } catch (err) {
+    logger.error('Mark notification read error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Analytics Endpoints
+
+// Get user analytics
+app.get('/api/analytics/user', authMiddleware, async (req, res) => {
+  try {
+    const userActivity = analytics.userActivity.get(req.userId) || [];
+    
+    // Calculate user stats
+    const today = new Date().toISOString().split('T')[0];
+    const todayActivity = userActivity.filter(activity => 
+      activity.timestamp.toISOString().split('T')[0] === today
+    );
+    
+    const userStats = {
+      totalActivities: userActivity.length,
+      todayActivities: todayActivity.length,
+      lastActivity: userActivity[0]?.timestamp || null,
+      activityByType: userActivity.reduce((acc, activity) => {
+        acc[activity.type] = (acc[activity.type] || 0) + 1;
+        return acc;
+      }, {})
+    };
+
+    res.json(userStats);
+  } catch (err) {
+    logger.error('Get user analytics error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get platform analytics (admin only)
+app.get('/api/analytics/platform', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    const activeUsers = Array.from(activeSessions.keys()).length;
+    const todayRegistrations = await User.countDocuments({
+      createdAt: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) }
+    });
+
+    res.json({
+      dailyStats: analytics.dailyStats,
+      gameStats: analytics.gameStats,
+      totalUsers,
+      activeUsers,
+      todayRegistrations,
+      security: {
+        blockedIPs: securityEvents.blockedIPs.size,
+        suspiciousActivities: securityEvents.suspiciousActivities.length
+      }
+    });
+  } catch (err) {
+    logger.error('Get platform analytics error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get game analytics
+app.get('/api/analytics/games', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    // Calculate RTP (Return to Player) for each game
+    const gameRTP = {};
+    Object.keys(analytics.gameStats).forEach(game => {
+      const stats = analytics.gameStats[game];
+      if (stats.wagered > 0) {
+        gameRTP[game] = ((stats.wagered - (stats.wagered * HOUSE_EDGE)) / stats.wagered * 100).toFixed(2);
+      } else {
+        gameRTP[game] = '0.00';
+      }
+    });
+
+    res.json({
+      gameStats: analytics.gameStats,
+      rtp: gameRTP,
+      houseEdge: (HOUSE_EDGE * 100).toFixed(2) + '%'
+    });
+  } catch (err) {
+    logger.error('Get game analytics error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================
+// EXISTING ENDPOINTS CONTINUE
+// ============================
+
 // Get cryptocurrency prices
 app.get('/api/crypto/prices', async (req, res) => {
   try {
@@ -1682,9 +2580,9 @@ app.get('/api/user/wager-requirement', authMiddleware, async (req, res) => {
     logger.error('Get wager requirement error:', err);
     res.status(500).json({ error: 'Server error' });
   }
-});// Signup
+});// Signup - UPDATED WITH EMAIL
 app.post('/api/auth/signup', async (req, res) => {
-  const { username, password, referralCode } = req.body;
+  const { username, password, referralCode, email } = req.body;
   const ip = req.ip || req.connection.remoteAddress;
   
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -1703,7 +2601,7 @@ app.post('/api/auth/signup', async (req, res) => {
   const hasUpperCase = /[A-Z]/.test(password);
   const hasLowerCase = /[a-z]/.test(password);
   const hasNumbers = /\d/.test(password);
-  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};';"\\|,.<>\/?]/.test(password);
   
   const passwordStrength = 
     (hasUpperCase ? 1 : 0) + 
@@ -1718,11 +2616,25 @@ app.post('/api/auth/signup', async (req, res) => {
     });
   }
 
+  // Validate email if provided
+  if (email) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+  }
+
   try {
     let user = await User.findOne({ username });
     if (user) return res.status(400).json({ error: 'Username already taken' });
 
-    user = new User({ username });
+    // Check if email is already used
+    if (email) {
+      const existingEmail = await User.findOne({ email });
+      if (existingEmail) return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    user = new User({ username, email });
     await user.setPassword(password);
     
     // Apply referral code if provided
@@ -1753,15 +2665,39 @@ app.post('/api/auth/signup', async (req, res) => {
     
     await user.save();
 
+    // Send welcome email if email provided
+    if (email) {
+      const verificationToken = generateVerificationToken();
+      user.emailVerificationToken = verificationToken;
+      user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      await user.save();
+
+      const verificationUrl = `${FRONTEND_URL}/verify-email?token=${verificationToken}`;
+      await sendEmail(
+        email,
+        'Welcome to Our Casino!',
+        `
+          <h2>Welcome to Our Casino, ${username}!</h2>
+          <p>Your account has been created successfully with a $0.05 welcome bonus!</p>
+          <p>Please verify your email address to unlock all features:</p>
+          <a href="${verificationUrl}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Verify Email</a>
+          <p>This link will expire in 24 hours.</p>
+        `
+      );
+    }
+
+    // Record analytics
+    recordAnalyticsEvent('registrations', { userId: user._id, username });
+
     logger.info(`New user registered: ${username}`);
-    res.json({ message: 'User created with $0.05 welcome bonus' });
+    res.json({ message: 'User created with $0.05 welcome bonus' + (email ? '. Verification email sent.' : '') });
   } catch (err) {
     logger.error('Error creating user:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Login
+// Login - UPDATED WITH SESSION TRACKING
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   const ip = req.ip || req.connection.remoteAddress;
@@ -1781,6 +2717,14 @@ app.post('/api/auth/login', async (req, res) => {
     if (!valid) {
       trackLoginAttempt(ip, false, username);
       return res.status(400).json({ error: 'Invalid credentials' });
+    }
+
+    // Check if 2FA is enabled
+    if (user.twoFactorEnabled) {
+      return res.status(400).json({ 
+        error: '2FA required',
+        requires2FA: true 
+      });
     }
     
     // Login successful
@@ -1815,7 +2759,23 @@ app.post('/api/auth/login', async (req, res) => {
     
     await user.save();
 
-    const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+    // Track session
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    trackUserSession(user._id, {
+      sessionId,
+      ip,
+      userAgent: req.get('User-Agent'),
+      loginTime: new Date()
+    });
+
+    // Record analytics
+    recordAnalyticsEvent('logins', { userId: user._id });
+
+    const token = jwt.sign({ 
+      userId: user._id, 
+      username: user.username,
+      sessionId 
+    }, JWT_SECRET, { expiresIn: '7d' });
     
     logger.info(`User logged in: ${username}`);
     res.json({ 
@@ -1823,7 +2783,10 @@ app.post('/api/auth/login', async (req, res) => {
       balance: user.balance, 
       username: user.username,
       referralCode: user.referralCode,
-      totalWagered: user.totalWagered
+      totalWagered: user.totalWagered,
+      email: user.email,
+      emailVerified: user.emailVerified,
+      twoFactorEnabled: user.twoFactorEnabled
     });
   } catch (err) {
     logger.error('Login error:', err);
@@ -1831,11 +2794,14 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// Get current user info
+// Get current user info - UPDATED WITH NEW FIELDS
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-passwordHash -__v');
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Update session activity
+    updateSessionActivity(req.userId, req.headers.authorization?.split(' ')[2]);
 
     res.json({
       id: user._id.toString(),  // Add id field for React compatibility
@@ -1855,7 +2821,18 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
       isAdmin: user.isAdmin || false,
       level: user.level,
       unwageredAmount: user.unwageredAmount,
-      wageringProgress: user.wageringProgress
+      wageringProgress: user.wageringProgress,
+      email: user.email,
+      emailVerified: user.emailVerified || false,
+      twoFactorEnabled: user.twoFactorEnabled || false,
+      notificationPreferences: user.notificationPreferences || {
+        email: true,
+        push: true,
+        deposits: true,
+        withdrawals: true,
+        wins: true,
+        promotions: true
+      }
     });
   } catch (err) {
     logger.error('Get user info error:', err);
@@ -1863,9 +2840,9 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
   }
 });
 
-// Update user profile
+// Update user profile - UPDATED WITH EMAIL
 app.patch('/api/user/profile', authMiddleware, async (req, res) => {
-  const { avatar, displayName } = req.body;
+  const { avatar, displayName, email } = req.body;
   
   try {
     const user = await User.findById(req.userId);
@@ -1875,12 +2852,48 @@ app.patch('/api/user/profile', authMiddleware, async (req, res) => {
     if (avatar) user.avatar = avatar;
     if (displayName) user.displayName = displayName;
     
+    // Handle email update
+    if (email && email !== user.email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ error: 'Invalid email address' });
+      }
+
+      // Check if email is already used
+      const existingUser = await User.findOne({ email, _id: { $ne: req.userId } });
+      if (existingUser) {
+        return res.status(400).json({ error: 'Email address already in use' });
+      }
+
+      user.email = email;
+      user.emailVerified = false;
+
+      // Send verification email
+      const verificationToken = generateVerificationToken();
+      user.emailVerificationToken = verificationToken;
+      user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+      const verificationUrl = `${FRONTEND_URL}/verify-email?token=${verificationToken}`;
+      await sendEmail(
+        email,
+        'Verify Your Email Address',
+        `
+          <h2>Email Verification Required</h2>
+          <p>Please verify your new email address by clicking the link below:</p>
+          <a href="${verificationUrl}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Verify Email</a>
+          <p>This link will expire in 24 hours.</p>
+        `
+      );
+    }
+    
     await user.save();
     
     res.json({ 
       message: 'Profile updated successfully',
       avatar: user.avatar,
-      displayName: user.displayName
+      displayName: user.displayName,
+      email: user.email,
+      emailVerified: user.emailVerified
     });
   } catch (err) {
     logger.error('Update profile error:', err);
@@ -1904,7 +2917,7 @@ app.post('/api/auth/change-password', authMiddleware, async (req, res) => {
   const hasUpperCase = /[A-Z]/.test(newPassword);
   const hasLowerCase = /[a-z]/.test(newPassword);
   const hasNumbers = /\d/.test(newPassword);
-  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(newPassword);
+  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};';"\\|,.<>\/?]/.test(newPassword);
   
   const passwordStrength = 
     (hasUpperCase ? 1 : 0) + 
@@ -1928,6 +2941,17 @@ app.post('/api/auth/change-password', authMiddleware, async (req, res) => {
     
     await user.setPassword(newPassword);
     await user.save();
+
+    // Send notification
+    sendPushNotification(user._id, 'Password Changed', 'Your password has been changed successfully.');
+
+    // Invalidate all sessions except current one
+    const currentSessionId = req.headers.authorization?.split(' ')[2];
+    const userSessions = activeSessions.get(req.userId);
+    if (userSessions) {
+      const currentSession = userSessions.find(session => session.sessionId === currentSessionId);
+      activeSessions.set(req.userId, currentSession ? [currentSession] : []);
+    }
     
     logger.info(`Password changed for user: ${user.username}`);
     res.json({ message: 'Password changed successfully' });
@@ -2002,6 +3026,9 @@ app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
         }
       }
     });
+
+    // Record analytics
+    recordAnalyticsEvent('deposits', { userId: req.userId, amount, currency });
 
     res.json({
       deposit_url: response.data.invoice_url,
@@ -2139,6 +3166,9 @@ app.post('/api/user/claim-free-coins', authMiddleware, async (req, res) => {
         rewardAmount
       }
     }).save();
+
+    // Send notification
+    sendPushNotification(user._id, 'Free Coins Claimed', `You received $${rewardAmount.toFixed(2)} and ${casesAwarded} free case${casesAwarded !== 1 ? 's' : ''}!`);
 
     // Log the action
     logger.info(`User ${req.userId} claimed free coins: $${rewardAmount.toFixed(2)} (${casesAwarded} cases)`);
@@ -2403,6 +3433,10 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
       // Continue even if tip record fails
     }
 
+    // Send notifications
+    sendPushNotification(sender._id, 'Tip Sent', `You sent $${amount.toFixed(2)} to ${recipientUsername}`);
+    sendPushNotification(recipient._id, 'Tip Received', `You received $${amount.toFixed(2)} from ${sender.username}`);
+
     res.json({
       success: true,
       balance: sender.balance,
@@ -2444,6 +3478,11 @@ app.post('/api/user/open-case/:caseType', authMiddleware, async (req, res) => {
     user.balance += item.value;
 
     await user.save();
+
+    // Send notification for rare items
+    if (item.rarity === 'rare' || item.rarity === 'epic' || item.rarity === 'legendary') {
+      sendPushNotification(user._id, 'Rare Item Unlocked!', `You found ${item.name} worth $${item.value} in a ${caseData.name}!`);
+    }
 
     res.json({
       success: true,
@@ -2540,6 +3579,9 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
           profit,
           multiplier: 2.0
         });
+
+        // Send push notification for big win
+        sendPushNotification(user._id, 'Big Win!', `You won $${profit.toFixed(2)} in Coinflip!`);
       }
       
       // Emit level up if threshold reached
@@ -2559,6 +3601,9 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
           casesAwarded,
           caseName
         });
+
+        // Send level up notification
+        sendPushNotification(user._id, 'Level Up!', `You reached level ${newLevel}! You received ${casesAwarded} ${caseName} case${casesAwarded !== 1 ? 's' : ''}.`);
       }
     } else {
       profit = -amount;
@@ -2567,6 +3612,14 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     }
     
     await user.save();
+
+    // Record analytics
+    recordAnalyticsEvent('gamesPlayed', { 
+      userId: req.userId, 
+      gameType: 'coinflip', 
+      amount, 
+      won 
+    });
     
     // Emit balance update
     io.to(req.userId).emit('balance_update', {
@@ -2727,6 +3780,9 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
           profit,
           multiplier
         });
+
+        // Send push notification for big win
+        sendPushNotification(user._id, 'Big Win!', `You won $${profit.toFixed(2)} in Upgrader with ${multiplier}x multiplier!`);
       }
       
       // Check for level up
@@ -2746,6 +3802,9 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
           casesAwarded,
           caseName
         });
+
+        // Send level up notification
+        sendPushNotification(user._id, 'Level Up!', `You reached level ${newLevel}! You received ${casesAwarded} ${caseName} case${casesAwarded !== 1 ? 's' : ''}.`);
       }
     } else {
       profit = -itemValue;
@@ -2787,6 +3846,14 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
     user.gameStats.set('upgrader', upgraderStats);
     
     await user.save();
+
+    // Record analytics
+    recordAnalyticsEvent('gamesPlayed', { 
+      userId: req.userId, 
+      gameType: 'upgrader', 
+      amount: itemValue, 
+      won 
+    });
     
     // Emit balance update
     io.to(req.userId).emit('balance_update', {
@@ -3048,6 +4115,9 @@ app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
           profit,
           multiplier: config.multiplier
         });
+
+        // Send push notification for big win
+        sendPushNotification(user._id, 'Big Win!', `You won $${profit.toFixed(2)} in Airdrop with ${config.multiplier}x multiplier!`);
       }
       
       // Check for level up
@@ -3066,6 +4136,9 @@ app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
           casesAwarded,
           caseName
         });
+
+        // Send level up notification
+        sendPushNotification(user._id, 'Level Up!', `You reached level ${newLevel}! You received ${casesAwarded} ${caseName} case${casesAwarded !== 1 ? 's' : ''}.`);
       }
     } else {
       profit = -amount;
@@ -3108,6 +4181,14 @@ app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
     
     user.gameStats.set('airdrop', airdropStats);
     await user.save();
+
+    // Record analytics
+    recordAnalyticsEvent('gamesPlayed', { 
+      userId: req.userId, 
+      gameType: 'airdrop', 
+      amount, 
+      won 
+    });
     
     // Emit balance update
     io.to(req.userId).emit('balance_update', {
@@ -3459,6 +4540,9 @@ app.post('/api/payment/webhook', async (req, res) => {
         // Mark payment as fully processed BEFORE notifications
         paymentProcessingTracker.markProcessed(paymentId);
 
+        // Record analytics
+        recordAnalyticsEvent('deposits', { userId, amount });
+
         // Notify frontend in real-time
         const notificationData = {
           newBalance: user.balance,
@@ -3473,6 +4557,9 @@ app.post('/api/payment/webhook', async (req, res) => {
         
         logger.info(`📡 Sending balance update notification to user-${userId}:`, notificationData);
         io.to(`user-${userId}`).emit('balance_update', notificationData);
+
+        // Send push notification
+        sendPushNotification(userId, 'Deposit Received', `Your deposit of $${amount.toFixed(2)} has been processed!`);
 
         logger.info(`💰 Deposit success: User ${userId} +$${amount} (Payment ID: ${paymentId}) - Processing time: ${Date.now() - startTime}ms`);
         return res.status(200).json({ success: true });
@@ -3587,12 +4674,18 @@ app.post('/api/payment/webhook-test', authMiddleware, async (req, res) => {
     user.balance += parseFloat(amount);
     await user.save();
     
+    // Record analytics
+    recordAnalyticsEvent('deposits', { userId: user._id, amount });
+    
     // Notify frontend in real-time
     io.to(`user-${userId}`).emit('balance_update', {
       newBalance: user.balance,
       amount,
       test: true
     });
+    
+    // Send push notification
+    sendPushNotification(user._id, 'Test Deposit', `Test deposit of $${amount.toFixed(2)} received!`);
     
     logger.info(`Test deposit: User ${userId} +$${amount}`);
     res.json({ success: true });
