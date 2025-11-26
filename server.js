@@ -22,7 +22,6 @@ const cron = require('node-cron');
 const ReferralReward = require('./models/referralReward');
 
 
-const cron = require('node-cron');
 const ReferralReward = require('./models/referralReward');
 // <-- ADD THE RESEND CODE HERE -->
 // Resend.com email configuration
