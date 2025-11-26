@@ -47,14 +47,19 @@ const EMAIL_CONFIG = {
 // Create email transporter
 const emailTransporter = nodemailer.createTransport(EMAIL_CONFIG);
 
-// Verify email configuration
-emailTransporter.verify((error, success) => {
-  if (error) {
-    console.log('❌ Email configuration error:', error);
-  } else {
-    console.log('✅ Email server is ready to send messages');
-  }
-});
+// Skip verification to avoid timeout errors
+console.log('📧 Email system loaded (verification skipped for deployment)');
+
+// Non-blocking verification - won't crash the app
+setTimeout(() => {
+  emailTransporter.verify((error, success) => {
+    if (error) {
+      console.log('⚠️ Email verification failed, but continuing...', error.message);
+    } else {
+      console.log('✅ Email server is ready to send messages');
+    }
+  });
+}, 1000); // Delay verification by 1 second
 
 // Create custom logger
 const logger = {
@@ -715,7 +720,8 @@ async function sendEmail(to, subject, html) {
     logger.info(`Email sent to ${to}`);
     return true;
   } catch (error) {
-    logger.error('Error sending email:', error);
+    logger.error('Error sending email:', error.message);
+    // Don't throw error - just log it and continue
     return false;
   }
 }
