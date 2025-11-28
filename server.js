@@ -804,59 +804,76 @@ function sendPushNotification(userId, title, message, data = {}) {
 }
 
 async function processWagerWithRequirements(userId, amount, gameType) {
-  const user = await User.findById(userId);
-  if (!user) return;
+  try {
+    const user = await User.findById(userId);
+    if (!user) return;
 
-  // Initialize unwagered amount if not exists
-  if (user.unwageredAmount === undefined) {
-    user.unwageredAmount = 0;
-  }
-  
-  // Initialize wagering progress if not exists
-  if (!user.wageringProgress) {
-    user.wageringProgress = {
-      totalDeposited: 0,
-      totalWageredSinceDeposit: 0,
-      totalTipsReceived: 0,
-      totalWageredSinceTips: 0
+    // SAFELY initialize unwagered amount - ensure it's always a number
+    if (user.unwageredAmount === undefined || user.unwageredAmount === null || isNaN(user.unwageredAmount)) {
+      user.unwageredAmount = 0;
+    }
+    
+    // SAFELY initialize wagering progress with proper number defaults
+    if (!user.wageringProgress) {
+      user.wageringProgress = {
+        totalDeposited: 0,
+        totalWageredSinceDeposit: 0,
+        totalTipsReceived: 0,
+        totalWageredSinceTips: 0
+      };
+    }
+    
+    // Ensure all wagering progress fields are numbers
+    user.wageringProgress.totalDeposited = Number(user.wageringProgress.totalDeposited) || 0;
+    user.wageringProgress.totalWageredSinceDeposit = Number(user.wageringProgress.totalWageredSinceDeposit) || 0;
+    user.wageringProgress.totalTipsReceived = Number(user.wageringProgress.totalTipsReceived) || 0;
+    user.wageringProgress.totalWageredSinceTips = Number(user.wageringProgress.totalWageredSinceTips) || 0;
+    
+    // Track this wager
+    user.wageringProgress.totalWageredSinceDeposit += Number(amount);
+    user.wageringProgress.totalWageredSinceTips += Number(amount);
+    
+    // Calculate total required wagering
+    const depositRequirement = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
+    const tipsRequirement = user.wageringProgress.totalTipsReceived * WAGER_REQUIREMENT_MULTIPLIER;
+    const totalRequired = depositRequirement + tipsRequirement;
+    
+    // Calculate total wagered against requirements
+    const totalWagered = Math.min(
+      user.wageringProgress.totalWageredSinceDeposit + user.wageringProgress.totalWageredSinceTips,
+      totalRequired
+    );
+    
+    // Update unwagered amount - ensure it's always a valid number
+    const previousUnwagered = user.unwageredAmount;
+    const newUnwagered = Math.max(0, totalRequired - totalWagered);
+    user.unwageredAmount = isNaN(newUnwagered) ? 0 : newUnwagered;
+    
+    // Check if requirements are fully met
+    const requirementsMet = user.unwageredAmount <= 0;
+    
+    // Save the user after updating wagering progress
+    await user.save();
+    
+    logger.info(`Wager processed for user ${userId}: $${amount} in ${gameType}, unwagered: $${previousUnwagered} -> $${user.unwageredAmount}, requirements met: ${requirementsMet}`);
+    
+    return {
+      requirementsMet,
+      unwageredAmount: user.unwageredAmount,
+      totalRequired,
+      totalWagered
+    };
+  } catch (error) {
+    logger.error('Error in processWagerWithRequirements:', error);
+    // Return a safe default if there's an error
+    return {
+      requirementsMet: false,
+      unwageredAmount: 0,
+      totalRequired: 0,
+      totalWagered: 0
     };
   }
-  
-  // Track this wager
-  user.wageringProgress.totalWageredSinceDeposit += amount;
-  user.wageringProgress.totalWageredSinceTips += amount;
-  
-  // Calculate total required wagering
-  const depositRequirement = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
-  const tipsRequirement = user.wageringProgress.totalTipsReceived * WAGER_REQUIREMENT_MULTIPLIER;
-  const totalRequired = depositRequirement + tipsRequirement;
-  
-  // Calculate total wagered against requirements
-  const totalWagered = Math.min(
-    user.wageringProgress.totalWageredSinceDeposit + user.wageringProgress.totalWageredSinceTips,
-    totalRequired
-  );
-  
-  // Update unwagered amount
-  const previousUnwagered = user.unwageredAmount;
-  user.unwageredAmount = Math.max(0, totalRequired - totalWagered);
-  
-  // Check if requirements are fully met
-  const requirementsMet = user.unwageredAmount <= 0;
-  
-  // ✅ CRITICAL FIX: Save the user after updating wagering progress
-  await user.save();
-  
-  logger.info(`Wager processed for user ${userId}: $${amount} in ${gameType}, unwagered: $${previousUnwagered} -> $${user.unwageredAmount}, requirements met: ${requirementsMet}`);
-  
-  return {
-    requirementsMet,
-    unwageredAmount: user.unwageredAmount,
-    totalRequired,
-    totalWagered
-  };
 }
-
 async function startJackpotGame(io) {
   jackpotGame.isRunning = true;
   io.emit('jackpot_start');
@@ -2610,6 +2627,64 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     logger.error('Error fetching wagering status:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get wagering status endpoint - FIXED VERSION
+app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
+  // ... your existing wagering status code ...
+});
+
+// EMERGENCY FIX: Reset NaN values for current user
+app.post('/api/fix-nan', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    let fixed = false;
+    
+    // Fix unwageredAmount if it's NaN
+    if (isNaN(user.unwageredAmount)) {
+      user.unwageredAmount = 0;
+      fixed = true;
+    }
+    
+    // Fix wageringProgress if any fields are NaN
+    if (user.wageringProgress) {
+      if (isNaN(user.wageringProgress.totalDeposited)) {
+        user.wageringProgress.totalDeposited = 0;
+        fixed = true;
+      }
+      if (isNaN(user.wageringProgress.totalWageredSinceDeposit)) {
+        user.wageringProgress.totalWageredSinceDeposit = 0;
+        fixed = true;
+      }
+      if (isNaN(user.wageringProgress.totalTipsReceived)) {
+        user.wageringProgress.totalTipsReceived = 0;
+        fixed = true;
+      }
+      if (isNaN(user.wageringProgress.totalWageredSinceTips)) {
+        user.wageringProgress.totalWageredSinceTips = 0;
+        fixed = true;
+      }
+    }
+    
+    await user.save();
+    
+    res.json({ 
+      success: true, 
+      fixed: fixed,
+      message: fixed ? 'Fixed NaN values' : 'No NaN values found',
+      userData: {
+        unwageredAmount: user.unwageredAmount,
+        wageringProgress: user.wageringProgress
+      }
+    });
+  } catch (err) {
+    logger.error('Fix NaN error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
