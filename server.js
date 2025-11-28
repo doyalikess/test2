@@ -21,10 +21,6 @@ const { recordWager, updateWagerOutcome } = require('./routes/wager'); // Import
 const cron = require('node-cron');
 const ReferralReward = require('./models/referralReward');
 
-
-
-
-
 // Set referral reward percentage
 const REFERRAL_REWARD_PERCENT = 0.1; // 0.1% of referred user's wagers
 
@@ -34,7 +30,6 @@ const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || 'H5RMGFD-DDJMKFB-
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || crypto.randomBytes(16).toString('hex');
 const CALLBACK_URL = 'https://test2-e7gb.onrender.com/api/payment/webhook';
 const FRONTEND_URL = 'http://localhost:3000';
-
 
 // Email configuration
 const EMAIL_CONFIG = {
@@ -306,8 +301,61 @@ const limboGames = new Map(); // Stores active limbo games by userId
 // Transaction tracking
 const transactions = new Map(); // Stores recent transactions for duplicate prevention
 
-// Unwagered deposit tracking for wagering requirements
-let WAGER_REQUIREMENT_MULTIPLIER = 1.0; // Users must wager 1x their deposit amount (default)
+// WAGERING REQUIREMENT SYSTEM - UPDATED TO WORK PROPERLY
+const WAGER_REQUIREMENT_MULTIPLIER = 1.0; // Users must wager 1x their deposit + tip amount
+
+// Helper function to track wagering requirements
+function trackWageringRequirement(user, amount, type) {
+  if (!user.wageringProgress) {
+    user.wageringProgress = {
+      totalDeposited: 0,
+      totalTipped: 0,
+      totalWagered: 0,
+      remainingRequirement: 0
+    };
+  }
+
+  if (type === 'deposit') {
+    user.wageringProgress.totalDeposited += amount;
+    user.wageringProgress.remainingRequirement += amount * WAGER_REQUIREMENT_MULTIPLIER;
+    logger.info(`💰 Deposit wagering requirement: User ${user._id} +$${amount} deposit, remaining requirement: $${user.wageringProgress.remainingRequirement}`);
+  } else if (type === 'tip') {
+    user.wageringProgress.totalTipped += amount;
+    user.wageringProgress.remainingRequirement += amount * WAGER_REQUIREMENT_MULTIPLIER;
+    logger.info(`🎁 Tip wagering requirement: User ${user._id} +$${amount} tip, remaining requirement: $${user.wageringProgress.remainingRequirement}`);
+  } else if (type === 'wager') {
+    user.wageringProgress.totalWagered += amount;
+    user.wageringProgress.remainingRequirement = Math.max(
+      0, 
+      user.wageringProgress.remainingRequirement - amount
+    );
+    logger.info(`🎯 Wager progress: User ${user._id} wagered $${amount}, remaining requirement: $${user.wageringProgress.remainingRequirement}`);
+  }
+
+  // Update the legacy unwageredAmount for compatibility
+  user.unwageredAmount = user.wageringProgress.remainingRequirement;
+}
+
+// Add method to User prototype for wager progress tracking
+User.prototype.recordWagerProgress = function(amount) {
+  if (!this.wageringProgress) {
+    this.wageringProgress = {
+      totalDeposited: 0,
+      totalTipped: 0,
+      totalWagered: 0,
+      remainingRequirement: 0
+    };
+  }
+  
+  this.wageringProgress.totalWagered += amount;
+  this.wageringProgress.remainingRequirement = Math.max(
+    0, 
+    this.wageringProgress.remainingRequirement - amount
+  );
+  
+  // Update legacy field for compatibility
+  this.unwageredAmount = this.wageringProgress.remainingRequirement;
+};
 
 // User level system configuration - 100 levels, with level 50 at $1,000 wagered
 const USER_LEVELS = [];
@@ -370,7 +418,9 @@ for (let i = 1; i <= 100; i++) {
     color,
     rewards: { maxBet }
   });
-}// Mines game helper functions
+}
+
+// Mines game helper functions
 function generateMinesPositions(gridSize, minesCount) {
   const positions = new Set();
   while (positions.size < minesCount) {
@@ -877,7 +927,9 @@ async function startJackpotGame(io) {
     jackpotGame.totalPot = 0;
     jackpotGame.isRunning = false;
   }, 7000);
-}io.on('connection', (socket) => {
+}
+
+io.on('connection', (socket) => {
   logger.info('🔌 A user connected');
 
   // Join user to their own room for targeted events
@@ -1006,39 +1058,8 @@ async function startJackpotGame(io) {
       // Record the wager
       const wager = await recordWager(userId, 'jackpot', bet);
       
-      // Track wager in user stats and reduce unwagered amount
-      // Process unwagered amount for wagering requirements
-      if (user.unwageredAmount === undefined) {
-        user.unwageredAmount = 0;
-      }
-      
-      // Track wagering progress for requirements
-      if (!user.wageringProgress) {
-        user.wageringProgress = {
-          totalDeposited: user.unwageredAmount || 0,
-          totalWageredSinceDeposit: 0
-        };
-      }
-      
-      // Add this wager to total wagered
-      user.wageringProgress.totalWageredSinceDeposit += bet;
-      
-      // Check if wagering requirement is now met
-      const requiredWagering = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
-      if (user.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
-        // Requirement met - reset counters
-        user.unwageredAmount = 0;
-        user.wageringProgress = {
-          totalDeposited: 0,
-          totalWageredSinceDeposit: 0
-        };
-        logger.info(`User ${userId} completed wagering requirements! Total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, Required: $${requiredWagering}`);
-      } else {
-        // Still have requirements to meet
-        const remaining = requiredWagering - user.wageringProgress.totalWageredSinceDeposit;
-        user.unwageredAmount = remaining;
-        logger.info(`User ${userId} wagered $${bet} in jackpot, total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, still need: $${remaining.toFixed(2)}`);
-      }
+      // Track wager progress for wagering requirements
+      user.recordWagerProgress(bet);
       
       // Track wager stats
       user.totalWagered = (user.totalWagered || 0) + bet;
@@ -1118,39 +1139,8 @@ async function startJackpotGame(io) {
       // Record the wager
       const wager = await recordWager(userId, 'mines', betAmount);
       
-      // Track wager in user stats and reduce unwagered amount
-      // Process unwagered amount for wagering requirements
-      if (user.unwageredAmount === undefined) {
-        user.unwageredAmount = 0;
-      }
-      
-      // Track wagering progress for requirements
-      if (!user.wageringProgress) {
-        user.wageringProgress = {
-          totalDeposited: user.unwageredAmount || 0,
-          totalWageredSinceDeposit: 0
-        };
-      }
-      
-      // Add this wager to total wagered
-      user.wageringProgress.totalWageredSinceDeposit += betAmount;
-      
-      // Check if wagering requirement is now met
-      const requiredWagering = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
-      if (user.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
-        // Requirement met - reset counters
-        user.unwageredAmount = 0;
-        user.wageringProgress = {
-          totalDeposited: 0,
-          totalWageredSinceDeposit: 0
-        };
-        logger.info(`User ${userId} completed wagering requirements! Total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, Required: $${requiredWagering}`);
-      } else {
-        // Still have requirements to meet
-        const remaining = requiredWagering - user.wageringProgress.totalWageredSinceDeposit;
-        user.unwageredAmount = remaining;
-        logger.info(`User ${userId} wagered $${betAmount} in mines, total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, still need: $${remaining.toFixed(2)}`);
-      }
+      // Track wager progress for wagering requirements
+      user.recordWagerProgress(betAmount);
       
       // Track wager stats
       user.totalWagered = (user.totalWagered || 0) + betAmount;
@@ -1342,39 +1332,8 @@ async function startJackpotGame(io) {
       // Record the wager
       const wager = await recordWager(userId, 'limbo', betAmount);
       
-      // Track wager in user stats and reduce unwagered amount
-      // Process unwagered amount for wagering requirements
-      if (user.unwageredAmount === undefined) {
-        user.unwageredAmount = 0;
-      }
-      
-      // Track wagering progress for requirements
-      if (!user.wageringProgress) {
-        user.wageringProgress = {
-          totalDeposited: user.unwageredAmount || 0,
-          totalWageredSinceDeposit: 0
-        };
-      }
-      
-      // Add this wager to total wagered
-      user.wageringProgress.totalWageredSinceDeposit += betAmount;
-      
-      // Check if wagering requirement is now met
-      const requiredWagering = user.wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
-      if (user.wageringProgress.totalWageredSinceDeposit >= requiredWagering) {
-        // Requirement met - reset counters
-        user.unwageredAmount = 0;
-        user.wageringProgress = {
-          totalDeposited: 0,
-          totalWageredSinceDeposit: 0
-        };
-        logger.info(`User ${userId} completed wagering requirements! Total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, Required: $${requiredWagering}`);
-      } else {
-        // Still have requirements to meet
-        const remaining = requiredWagering - user.wageringProgress.totalWageredSinceDeposit;
-        user.unwageredAmount = remaining;
-        logger.info(`User ${userId} wagered $${betAmount} in limbo, total wagered: $${user.wageringProgress.totalWageredSinceDeposit}, still need: $${remaining.toFixed(2)}`);
-      }
+      // Track wager progress for wagering requirements
+      user.recordWagerProgress(betAmount);
       
       // Track wager stats
       user.totalWagered = (user.totalWagered || 0) + betAmount;
@@ -1602,7 +1561,9 @@ setInterval(() => {
           logger.info(`Auto-cleaned inactive limbo game for user ${userId}`);
         }
       }
-    }, 5 * 60 * 1000); // Run every 5 minutes// CORS middleware for REST API requests
+    }, 5 * 60 * 1000); // Run every 5 minutes
+
+// CORS middleware for REST API requests
 app.use(
   cors({
     origin: ['http://localhost:3000', FRONTEND_URL],
@@ -1917,6 +1878,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 // Request password reset
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
@@ -2497,22 +2459,36 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(50);
     
-    // Get unwagered amount and progress information
+    // Get wagering progress information
     const user = await User.findById(req.userId);
-    const unwageredAmount = user?.unwageredAmount || 0;
-    const wageringProgress = user?.wageringProgress || { totalDeposited: 0, totalWageredSinceDeposit: 0 };
+    const wageringProgress = user?.wageringProgress || {
+      totalDeposited: 0,
+      totalTipped: 0,
+      totalWagered: 0,
+      remainingRequirement: 0
+    };
+    
+    const totalRequired = (wageringProgress.totalDeposited + wageringProgress.totalTipped) * WAGER_REQUIREMENT_MULTIPLIER;
+    const canWithdraw = wageringProgress.remainingRequirement <= 0;
     
     res.json({
       transactions: wagers,
       wagering: {
-        unwageredAmount,
+        totalDeposited: wageringProgress.totalDeposited,
+        totalTipped: wageringProgress.totalTipped,
+        totalWagered: wageringProgress.totalWagered,
+        requiredWagering: totalRequired,
+        remaining: wageringProgress.remainingRequirement,
+        canWithdraw: canWithdraw,
         requirementMultiplier: WAGER_REQUIREMENT_MULTIPLIER,
-        canWithdraw: unwageredAmount <= 0,
         progress: {
           totalDeposited: wageringProgress.totalDeposited,
-          totalWagered: wageringProgress.totalWageredSinceDeposit,
-          required: wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER,
-          remaining: Math.max(0, (wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER) - wageringProgress.totalWageredSinceDeposit)
+          totalTipped: wageringProgress.totalTipped,
+          totalWagered: wageringProgress.totalWagered,
+          required: totalRequired,
+          remaining: wageringProgress.remainingRequirement,
+          percentage: totalRequired > 0 ? 
+            Math.min(100, (wageringProgress.totalWagered / totalRequired) * 100) : 100
         }
       }
     });
@@ -2522,7 +2498,7 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
   }
 });
 
-// Get wagering status endpoint
+// Get wagering status endpoint - UPDATED WITH NEW SYSTEM
 app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
@@ -2530,28 +2506,94 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
-    // Ensure unwageredAmount is initialized
-    if (user.unwageredAmount === undefined) {
-      user.unwageredAmount = 0;
+    // Initialize wagering progress if it doesn't exist
+    if (!user.wageringProgress) {
+      user.wageringProgress = {
+        totalDeposited: 0,
+        totalTipped: 0,
+        totalWagered: 0,
+        remainingRequirement: 0
+      };
       await user.save();
     }
     
-    const wageringProgress = user.wageringProgress || { totalDeposited: 0, totalWageredSinceDeposit: 0 };
+    const wageringProgress = user.wageringProgress;
+    const totalRequired = (wageringProgress.totalDeposited + wageringProgress.totalTipped) * WAGER_REQUIREMENT_MULTIPLIER;
+    const canWithdraw = wageringProgress.remainingRequirement <= 0;
     
     res.json({
-      unwageredAmount: user.unwageredAmount,
+      totalDeposited: wageringProgress.totalDeposited,
+      totalTipped: wageringProgress.totalTipped,
+      totalWagered: wageringProgress.totalWagered,
+      requiredWagering: totalRequired,
+      remaining: wageringProgress.remainingRequirement,
+      canWithdraw: canWithdraw,
       requirementMultiplier: WAGER_REQUIREMENT_MULTIPLIER,
-      canWithdraw: user.unwageredAmount <= 0,
-      totalWagered: user.totalWagered || 0,
       progress: {
         totalDeposited: wageringProgress.totalDeposited,
-        totalWagered: wageringProgress.totalWageredSinceDeposit,
-        required: wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER,
-        remaining: Math.max(0, (wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER) - wageringProgress.totalWageredSinceDeposit)
+        totalTipped: wageringProgress.totalTipped,
+        totalWagered: wageringProgress.totalWagered,
+        required: totalRequired,
+        remaining: wageringProgress.remainingRequirement,
+        percentage: totalRequired > 0 ? 
+          Math.min(100, (wageringProgress.totalWagered / totalRequired) * 100) : 100
       }
     });
   } catch (err) {
     logger.error('Error fetching wagering status:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get detailed wagering information - NEW ENDPOINT
+app.get('/api/user/wagering-details', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (!user.wageringProgress) {
+      user.wageringProgress = {
+        totalDeposited: 0,
+        totalTipped: 0,
+        totalWagered: 0,
+        remainingRequirement: 0
+      };
+      await user.save();
+    }
+    
+    const wp = user.wageringProgress;
+    const totalRequired = (wp.totalDeposited + wp.totalTipped) * WAGER_REQUIREMENT_MULTIPLIER;
+    const canWithdraw = wp.remainingRequirement <= 0;
+    
+    res.json({
+      summary: {
+        totalDeposited: wp.totalDeposited,
+        totalTipped: wp.totalTipped,
+        totalWagered: wp.totalWagered,
+        requiredWagering: totalRequired,
+        remainingRequirement: wp.remainingRequirement,
+        canWithdraw: canWithdraw,
+        multiplier: WAGER_REQUIREMENT_MULTIPLIER
+      },
+      breakdown: {
+        fromDeposits: wp.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER,
+        fromTips: wp.totalTipped * WAGER_REQUIREMENT_MULTIPLIER,
+        wageredSoFar: wp.totalWagered,
+        remaining: wp.remainingRequirement
+      },
+      progress: {
+        percentage: totalRequired > 0 ? 
+          Math.min(100, (wp.totalWagered / totalRequired) * 100) : 100,
+        status: canWithdraw ? 'Complete' : 'In Progress',
+        message: canWithdraw ? 
+          'You have completed all wagering requirements and can withdraw your funds.' :
+          `You need to wager $${wp.remainingRequirement.toFixed(2)} more before you can withdraw.`
+      }
+    });
+  } catch (err) {
+    logger.error('Error fetching wagering details:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -2590,14 +2632,28 @@ app.get('/api/user/wager-requirement', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
-    const wagerStatus = user.getWagerRequirementStatus ? user.getWagerRequirementStatus() : {
-      totalRequired: 0,
-      totalWagered: 0,
-      remaining: 0,
-      percentage: 100,
-      canWithdraw: true,
-      fromDeposits: 0,
-      fromTips: 0
+    if (!user.wageringProgress) {
+      user.wageringProgress = {
+        totalDeposited: 0,
+        totalTipped: 0,
+        totalWagered: 0,
+        remainingRequirement: 0
+      };
+      await user.save();
+    }
+    
+    const wp = user.wageringProgress;
+    const totalRequired = (wp.totalDeposited + wp.totalTipped) * WAGER_REQUIREMENT_MULTIPLIER;
+    const canWithdraw = wp.remainingRequirement <= 0;
+    
+    const wagerStatus = {
+      totalRequired: totalRequired,
+      totalWagered: wp.totalWagered,
+      remaining: wp.remainingRequirement,
+      percentage: totalRequired > 0 ? Math.min(100, (wp.totalWagered / totalRequired) * 100) : 100,
+      canWithdraw: canWithdraw,
+      fromDeposits: wp.totalDeposited,
+      fromTips: wp.totalTipped
     };
     
     res.json(wagerStatus);
@@ -2605,7 +2661,9 @@ app.get('/api/user/wager-requirement', authMiddleware, async (req, res) => {
     logger.error('Get wager requirement error:', err);
     res.status(500).json({ error: 'Server error' });
   }
-});// Signup - UPDATED WITH EMAIL
+});
+
+// Signup - UPDATED WITH EMAIL
 app.post('/api/auth/signup', async (req, res) => {
   const { username, password, referralCode, email } = req.body;
   const ip = req.ip || req.connection.remoteAddress;
@@ -2661,6 +2719,14 @@ app.post('/api/auth/signup', async (req, res) => {
 
     user = new User({ username, email });
     await user.setPassword(password);
+    
+    // Initialize wagering progress
+    user.wageringProgress = {
+      totalDeposited: 0,
+      totalTipped: 0,
+      totalWagered: 0,
+      remainingRequirement: 0
+    };
     
     // Apply referral code if provided
     if (referralCode) {
@@ -2984,7 +3050,9 @@ app.post('/api/auth/change-password', authMiddleware, async (req, res) => {
     logger.error('Change password error:', err);
     res.status(500).json({ error: 'Server error' });
   }
-});// Create a deposit invoice - REAL
+});
+
+// Create a deposit invoice - REAL
 app.post('/api/payment/deposit', authMiddleware, async (req, res) => {
   const { amount, currency } = req.body;
   if (!amount || !currency) return res.status(400).json({ error: 'Amount and currency required' });
@@ -3409,7 +3477,7 @@ app.get('/api/user/level', authMiddleware, async (req, res) => {
   }
 });
 
-// Send tip to another user
+// Send tip to another user - UPDATED WITH WAGERING REQUIREMENT TRACKING
 app.post('/api/user/tip', authMiddleware, async (req, res) => {
   try {
     const { recipientUsername, amount } = req.body;
@@ -3440,6 +3508,9 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
     sender.balance -= amount;
     recipient.balance += amount;
 
+    // Track wagering requirement for recipient (they need to wager tipped amount)
+    trackWageringRequirement(recipient, amount, 'tip');
+
     // Save both users
     await sender.save();
     await recipient.save();
@@ -3460,7 +3531,7 @@ app.post('/api/user/tip', authMiddleware, async (req, res) => {
 
     // Send notifications
     sendPushNotification(sender._id, 'Tip Sent', `You sent $${amount.toFixed(2)} to ${recipientUsername}`);
-    sendPushNotification(recipient._id, 'Tip Received', `You received $${amount.toFixed(2)} from ${sender.username}`);
+    sendPushNotification(recipient._id, 'Tip Received', `You received $${amount.toFixed(2)} from ${sender.username}. You now need to wager $${amount.toFixed(2)} before withdrawing.`);
 
     res.json({
       success: true,
@@ -3541,7 +3612,7 @@ app.get('/api/user/case-history', authMiddleware, async (req, res) => {
   }
 });
 
-// COINFLIP GAME ENDPOINTS FOR REACT COMPONENT
+// COINFLIP GAME ENDPOINTS FOR REACT COMPONENT - UPDATED WITH WAGERING REQUIREMENTS
 app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
   try {
     const { amount, choice } = req.body;
@@ -3566,10 +3637,8 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     // Record the wager
     const wager = await recordWager(req.userId, 'coinflip', amount);
     
-    // Track wager progress if user has wager requirements
-    if (user.recordWagerProgress) {
-      user.recordWagerProgress(amount);
-    }
+    // Track wager progress for wagering requirements
+    user.recordWagerProgress(amount);
     
     // Update user level based on wagering
     updateUserLevel(user);
@@ -3739,7 +3808,7 @@ app.get('/api/game/stats', authMiddleware, async (req, res) => {
   }
 });
 
-// UPGRADER GAME ENDPOINTS FOR REACT COMPONENT
+// UPGRADER GAME ENDPOINTS FOR REACT COMPONENT - UPDATED WITH WAGERING REQUIREMENTS
 app.post('/api/upgrader', authMiddleware, async (req, res) => {
   try {
     const { itemValue, multiplier } = req.body;
@@ -3769,10 +3838,8 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
     // Record the wager
     const wager = await recordWager(req.userId, 'upgrader', itemValue);
     
-    // Track wager progress if user has wager requirements
-    if (user.recordWagerProgress) {
-      user.recordWagerProgress(itemValue);
-    }
+    // Track wager progress for wagering requirements
+    user.recordWagerProgress(itemValue);
     
     // Update user level based on wagering
     updateUserLevel(user);
@@ -3972,7 +4039,7 @@ app.get('/api/stats/online-players', authMiddleware, async (req, res) => {
   }
 });
 
-// AIRDROP CUP GAME ENDPOINTS
+// AIRDROP CUP GAME ENDPOINTS - UPDATED WITH WAGERING REQUIREMENTS
 
 // Airdrop game difficulty presets - Balanced for better gameplay
 const AIRDROP_DIFFICULTY_PRESETS = {
@@ -4038,7 +4105,7 @@ const AIRDROP_DIFFICULTY_PRESETS = {
   }
 };
 
-// Play airdrop game
+// Play airdrop game - UPDATED WITH WAGERING REQUIREMENTS
 app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
   try {
     const { amount, difficulty, selectedCup } = req.body;
@@ -4074,10 +4141,8 @@ app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
     // Record the wager
     const wager = await recordWager(req.userId, 'airdrop', amount);
     
-    // Track wager progress
-    if (user.recordWagerProgress) {
-      user.recordWagerProgress(amount);
-    }
+    // Track wager progress for wagering requirements
+    user.recordWagerProgress(amount);
     
     // Update user level based on wagering
     updateUserLevel(user);
@@ -4318,7 +4383,9 @@ app.get('/api/user/recent-airdrop-games', authMiddleware, async (req, res) => {
     logger.error('Get recent airdrop games error:', err);
     res.status(500).json({ error: 'Server error' });
   }
-});// BULLETPROOF webhook handler with enhanced duplicate prevention
+});
+
+// BULLETPROOF webhook handler with enhanced duplicate prevention - UPDATED WITH WAGERING REQUIREMENTS
 app.post('/api/payment/webhook', async (req, res) => {
   const startTime = Date.now();
   
@@ -4508,24 +4575,10 @@ app.post('/api/payment/webhook', async (req, res) => {
         // ATOMIC BALANCE UPDATE: Set balance directly to avoid double crediting issues
         user.balance = previousBalance + amount;
         
-        // Add to unwagered amount for wagering requirements (track total deposits that need wagering)
-        if (!user.unwageredAmount) {
-          user.unwageredAmount = 0;
-        }
-        user.unwageredAmount += amount;
+        // Track wagering requirement for deposit
+        trackWageringRequirement(user, amount, 'deposit');
         
-        // Initialize wagering tracking if needed
-        if (!user.wageringProgress) {
-          user.wageringProgress = {
-            totalDeposited: 0,
-            totalWageredSinceDeposit: 0
-          };
-        }
-        
-        // Track this deposit
-        user.wageringProgress.totalDeposited += amount;
-        
-        logger.info(`✅ Processing deposit for user ${userId}: $${amount} (${previousBalance} -> ${user.balance}, unwagered: ${user.unwageredAmount})`);
+        logger.info(`✅ Processing deposit for user ${userId}: $${amount} (${previousBalance} -> ${user.balance}, remaining requirement: ${user.wageringProgress?.remainingRequirement || 0})`);
         
         // Update deposit status if we have invoice_id
         if (invoice_id) {
@@ -4584,7 +4637,7 @@ app.post('/api/payment/webhook', async (req, res) => {
         io.to(`user-${userId}`).emit('balance_update', notificationData);
 
         // Send push notification
-        sendPushNotification(userId, 'Deposit Received', `Your deposit of $${amount.toFixed(2)} has been processed!`);
+        sendPushNotification(userId, 'Deposit Received', `Your deposit of $${amount.toFixed(2)} has been processed! You now need to wager $${amount.toFixed(2)} before withdrawing.`);
 
         logger.info(`💰 Deposit success: User ${userId} +$${amount} (Payment ID: ${paymentId}) - Processing time: ${Date.now() - startTime}ms`);
         return res.status(200).json({ success: true });
@@ -4697,6 +4750,10 @@ app.post('/api/payment/webhook-test', authMiddleware, async (req, res) => {
     
     // Credit balance
     user.balance += parseFloat(amount);
+    
+    // Track wagering requirement for deposit
+    trackWageringRequirement(user, amount, 'deposit');
+    
     await user.save();
     
     // Record analytics
@@ -4710,7 +4767,7 @@ app.post('/api/payment/webhook-test', authMiddleware, async (req, res) => {
     });
     
     // Send push notification
-    sendPushNotification(user._id, 'Test Deposit', `Test deposit of $${amount.toFixed(2)} received!`);
+    sendPushNotification(user._id, 'Test Deposit', `Test deposit of $${amount.toFixed(2)} received! You now need to wager $${amount.toFixed(2)} before withdrawing.`);
     
     logger.info(`Test deposit: User ${userId} +$${amount}`);
     res.json({ success: true });
@@ -4805,10 +4862,8 @@ app.post('/api/upgrader/play', authMiddleware, async (req, res) => {
     // Record the wager
     const wager = await recordWager(req.userId, 'upgrader', amount);
     
-    // Track wager progress if user has wager requirements
-    if (user.recordWagerProgress) {
-      user.recordWagerProgress(amount);
-    }
+    // Track wager progress for wagering requirements
+    user.recordWagerProgress(amount);
     
     // Track wager stats
     user.totalWagered = (user.totalWagered || 0) + amount;
@@ -4885,10 +4940,8 @@ app.post('/api/coinflip/play', authMiddleware, async (req, res) => {
     // Record the wager
     const wager = await recordWager(req.userId, 'coinflip', amount);
     
-    // Track wager progress if user has wager requirements
-    if (user.recordWagerProgress) {
-      user.recordWagerProgress(amount);
-    }
+    // Track wager progress for wagering requirements
+    user.recordWagerProgress(amount);
     
     // Track wager stats
     user.totalWagered = (user.totalWagered || 0) + amount;
