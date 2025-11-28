@@ -2502,7 +2502,33 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
   }
 });
 
-// Get wagering status endpoint - UPDATED WITH TIPS
+// Helper function to initialize wagering progress for existing users
+async function initializeWageringProgress(userId) {
+  try {
+    const user = await User.findById(userId);
+    if (!user) return;
+    
+    if (!user.wageringProgress) {
+      user.wageringProgress = {
+        totalDeposited: 0,
+        totalWageredSinceDeposit: 0,
+        totalTipsReceived: 0,
+        totalWageredSinceTips: 0
+      };
+    }
+    
+    if (user.unwageredAmount === undefined) {
+      user.unwageredAmount = 0;
+    }
+    
+    await user.save();
+    logger.info(`Initialized wagering progress for user ${userId}`);
+  } catch (error) {
+    logger.error('Error initializing wagering progress:', error);
+  }
+}
+
+// Get wagering status endpoint - FIXED VERSION
 app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
@@ -2513,15 +2539,21 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
     // Ensure unwageredAmount is initialized
     if (user.unwageredAmount === undefined) {
       user.unwageredAmount = 0;
-      await user.save();
     }
     
+    // Ensure wageringProgress has proper structure with defaults
     const wageringProgress = user.wageringProgress || { 
       totalDeposited: 0, 
       totalWageredSinceDeposit: 0,
       totalTipsReceived: 0,
       totalWageredSinceTips: 0
     };
+    
+    // Set defaults for any missing fields
+    wageringProgress.totalDeposited = wageringProgress.totalDeposited || 0;
+    wageringProgress.totalWageredSinceDeposit = wageringProgress.totalWageredSinceDeposit || 0;
+    wageringProgress.totalTipsReceived = wageringProgress.totalTipsReceived || 0;
+    wageringProgress.totalWageredSinceTips = wageringProgress.totalWageredSinceTips || 0;
     
     // Calculate requirements for deposits and tips
     const depositRequirement = wageringProgress.totalDeposited * WAGER_REQUIREMENT_MULTIPLIER;
@@ -2530,6 +2562,16 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
     
     const totalWagered = wageringProgress.totalWageredSinceDeposit + wageringProgress.totalWageredSinceTips;
     const remaining = Math.max(0, totalRequired - totalWagered);
+    
+    // Calculate percentages safely
+    const depositPercentage = depositRequirement > 0 ? 
+      Math.min(100, (wageringProgress.totalWageredSinceDeposit / depositRequirement) * 100) : 100;
+    
+    const tipsPercentage = tipsRequirement > 0 ? 
+      Math.min(100, (wageringProgress.totalWageredSinceTips / tipsRequirement) * 100) : 100;
+    
+    const combinedPercentage = totalRequired > 0 ? 
+      Math.min(100, (totalWagered / totalRequired) * 100) : 100;
     
     res.json({
       unwageredAmount: user.unwageredAmount,
@@ -2543,8 +2585,7 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
           totalWagered: wageringProgress.totalWageredSinceDeposit,
           required: depositRequirement,
           remaining: Math.max(0, depositRequirement - wageringProgress.totalWageredSinceDeposit),
-          percentage: depositRequirement > 0 ? 
-            Math.min(100, (wageringProgress.totalWageredSinceDeposit / depositRequirement) * 100) : 100
+          percentage: parseFloat(depositPercentage.toFixed(2))
         },
         // Tips progress
         tips: {
@@ -2552,8 +2593,7 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
           totalWagered: wageringProgress.totalWageredSinceTips,
           required: tipsRequirement,
           remaining: Math.max(0, tipsRequirement - wageringProgress.totalWageredSinceTips),
-          percentage: tipsRequirement > 0 ? 
-            Math.min(100, (wageringProgress.totalWageredSinceTips / tipsRequirement) * 100) : 100
+          percentage: parseFloat(tipsPercentage.toFixed(2))
         },
         // Combined progress
         combined: {
@@ -2562,8 +2602,7 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
           totalWagered: totalWagered,
           required: totalRequired,
           remaining: remaining,
-          percentage: totalRequired > 0 ? 
-            Math.min(100, (totalWagered / totalRequired) * 100) : 100
+          percentage: parseFloat(combinedPercentage.toFixed(2))
         }
       }
     });
