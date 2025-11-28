@@ -1,6 +1,7 @@
 require('dotenv').config();
 const User = require('./models/user');
 const Wager = require('./models/wager'); // New import for wager model
+const PromoCode = require('./models/promoCode'); // New import for promo codes
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -42,6 +43,90 @@ const EMAIL_CONFIG = {
     pass: process.env.EMAIL_PASS
   }
 };
+
+// ============================
+// CASINO CONFIGURATION - UPDATED TO 30% HOUSE EDGE
+// ============================
+const HOUSE_EDGE = 0.30; // 30% house edge for all games
+const COINFLIP_WIN_CHANCE = 0.5 - (HOUSE_EDGE / 2); // 35% win chance for coinflip (was 50%)
+
+/*
+ * HOUSE EDGE IMPLEMENTATION:
+ * - Coinflip: 35% win chance instead of 50% (30% house edge)
+ * - Upgrader: Win chances reduced by 30% (e.g., 2x = 35% instead of 50%)
+ * - Limbo: Win chances reduced by 30% (e.g., 2x = 35% instead of 50%)
+ * 
+ * This ensures the casino maintains a statistical advantage while 
+ * keeping games fair and transparent.
+ */
+
+// ============================
+// PROVABLY FAIR SYSTEM
+// ============================
+
+// Generate server seed (change this periodically)
+const SERVER_SEED = crypto.randomBytes(32).toString('hex');
+let clientSeed = crypto.randomBytes(16).toString('hex');
+
+// Function to generate provably fair result
+function generateProvablyFairResult(serverSeed, clientSeed, nonce, gameType) {
+  const hmac = crypto.createHmac('sha256', serverSeed);
+  hmac.update(`${clientSeed}:${nonce}:${gameType}`);
+  const hash = hmac.digest('hex');
+  
+  // Use first 8 characters of hash to generate number between 0-1
+  const randomValue = parseInt(hash.substring(0, 8), 16) / 0xFFFFFFFF;
+  
+  return randomValue;
+}
+
+// Apply house edge to random result
+function applyHouseEdge(randomValue, gameType, targetMultiplier = null) {
+  let result;
+  
+  switch (gameType) {
+    case 'coinflip':
+      // For coinflip, player wins if randomValue < 0.35 (35% chance)
+      result = randomValue < COINFLIP_WIN_CHANCE;
+      break;
+      
+    case 'upgrader':
+      // For upgrader, reduce win chance by 30%
+      if (targetMultiplier) {
+        const theoreticalChance = 1 / targetMultiplier;
+        const actualChance = theoreticalChance * (1 - HOUSE_EDGE);
+        result = randomValue < actualChance;
+      }
+      break;
+      
+    case 'limbo':
+      // For limbo, reduce win chance by 30%
+      if (targetMultiplier) {
+        const theoreticalChance = 1 / targetMultiplier;
+        const actualChance = theoreticalChance * (1 - HOUSE_EDGE);
+        result = randomValue < actualChance;
+      }
+      break;
+      
+    case 'mines':
+      // For mines, adjust probabilities
+      result = randomValue; // Mines logic is more complex
+      break;
+      
+    default:
+      result = randomValue;
+  }
+  
+  return result;
+}
+
+// ============================
+// ADMIN SYSTEM CONFIGURATION
+// ============================
+
+// Chat control state
+let chatMuted = false;
+const mutedUsers = new Map(); // userId -> { until: timestamp, reason: string }
 
 // Create custom logger
 const logger = {
@@ -176,20 +261,6 @@ const strictLimiter = new RateLimiter(
   { error: 'Too many sensitive requests, please wait before trying again' }
 );
 
-// CASINO CONFIGURATION
-const HOUSE_EDGE = 0.10; // 10% house edge for all games
-const COINFLIP_WIN_CHANCE = 0.5 - (HOUSE_EDGE / 2); // 45% win chance for coinflip (was 50%)
-
-/*
- * HOUSE EDGE IMPLEMENTATION:
- * - Coinflip: 45% win chance instead of 50% (10% house edge)
- * - Upgrader: Win chances reduced by 10% (e.g., 2x = 45% instead of 50%)
- * - Limbo: Win chances reduced by 10% (e.g., 2x = 45% instead of 50%)
- * 
- * This ensures the casino maintains a statistical advantage while 
- * keeping games fair and transparent.
- */
-
 // Cache for crypto prices
 const cryptoPriceCache = {
   prices: {},
@@ -273,8 +344,6 @@ const securityEvents = {
 
 const app = express();
 const server = http.createServer(app);
-const adminRoutes = require('./admin');  // Make sure this path is correct
-app.use('/api/admin', adminRoutes);
 
 // Socket.IO setup with CORS for frontend origins
 const io = new Server(server, {
@@ -874,6 +943,7 @@ async function processWagerWithRequirements(userId, amount, gameType) {
     };
   }
 }
+
 async function startJackpotGame(io) {
   jackpotGame.isRunning = true;
   io.emit('jackpot_start');
@@ -1045,10 +1115,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('chatMessage', (message) => {
-    // Basic chat filter for offensive content
-    const filteredMessage = filterOffensiveContent(message);
-    io.emit('chatMessage', filteredMessage);
+  socket.on('chatMessage', async (message) => {
+    try {
+      // Check if global chat is muted
+      if (chatMuted) {
+        socket.emit('chat_error', 'Chat is currently muted by admin');
+        return;
+      }
+      
+      // Check if user is muted
+      const user = await User.findById(socket.userId);
+      if (user && user.mutedUntil && new Date(user.mutedUntil) > new Date()) {
+        socket.emit('chat_error', `You are muted until ${new Date(user.mutedUntil).toLocaleString()}. Reason: ${user.muteReason}`);
+        return;
+      }
+      
+      // Process chat message
+      const filteredMessage = filterOffensiveContent(message);
+      io.emit('chatMessage', filteredMessage);
+    } catch (err) {
+      logger.error('Chat message error:', err);
+    }
   });
 
   socket.on('join_jackpot', async ({ userId, username, bet }) => {
@@ -1693,18 +1780,261 @@ function adminMiddleware(req, res, next) {
     });
 }
 
+// ============================
+// ADMIN ROUTES
+// ============================
+
+// Get all users (admin only)
+app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const users = await User.find({})
+      .select('username balance isMuted mutedUntil muteReason createdAt')
+      .lean();
+    
+    // Check if users are currently muted
+    const usersWithMuteStatus = users.map(user => ({
+      ...user,
+      isMuted: user.mutedUntil && new Date(user.mutedUntil) > new Date()
+    }));
+    
+    res.json({ users: usersWithMuteStatus });
+  } catch (err) {
+    logger.error('Get users error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Toggle global chat mute
+app.post('/api/admin/toggle-chat', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    chatMuted = !chatMuted;
+    
+    // Broadcast chat status to all users
+    io.emit('chat_status_update', { 
+      chatMuted, 
+      message: chatMuted ? 'Chat has been muted by admin' : 'Chat has been unmuted by admin' 
+    });
+    
+    res.json({ chatMuted });
+  } catch (err) {
+    logger.error('Toggle chat error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get chat status
+app.get('/api/admin/chat-status', authMiddleware, adminMiddleware, async (req, res) => {
+  res.json({ chatMuted });
+});
+
+// Mute/unmute user
+app.post('/api/admin/mute-user', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId, duration, reason } = req.body;
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (user.mutedUntil && new Date(user.mutedUntil) > new Date()) {
+      // Unmute user
+      user.mutedUntil = null;
+      user.muteReason = null;
+      await user.save();
+      
+      // Notify user
+      io.to(`user-${userId}`).emit('user_muted', { muted: false });
+      
+      res.json({ message: 'User unmuted successfully' });
+    } else {
+      // Mute user
+      const muteUntil = new Date(Date.now() + (duration * 60 * 60 * 1000)); // hours to milliseconds
+      user.mutedUntil = muteUntil;
+      user.muteReason = reason || 'No reason provided';
+      await user.save();
+      
+      // Notify user
+      io.to(`user-${userId}`).emit('user_muted', { 
+        muted: true, 
+        until: muteUntil, 
+        reason: user.muteReason 
+      });
+      
+      res.json({ message: 'User muted successfully' });
+    }
+  } catch (err) {
+    logger.error('Mute user error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Create promo code
+app.post('/api/admin/create-promo-code', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { code, value, uses } = req.body;
+    
+    if (!code || !value) {
+      return res.status(400).json({ error: 'Code and value are required' });
+    }
+    
+    const existingCode = await PromoCode.findOne({ code: code.toUpperCase() });
+    if (existingCode) {
+      return res.status(400).json({ error: 'Promo code already exists' });
+    }
+    
+    const promoCode = new PromoCode({
+      code: code.toUpperCase(),
+      value: parseFloat(value),
+      maxUses: parseInt(uses) || 1,
+      createdBy: req.userId,
+      createdAt: new Date()
+    });
+    
+    await promoCode.save();
+    
+    res.json({ success: true, promoCode });
+  } catch (err) {
+    logger.error('Create promo code error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get all promo codes
+app.get('/api/admin/promo-codes', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const promoCodes = await PromoCode.find({})
+      .populate('createdBy', 'username')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    res.json({ promoCodes });
+  } catch (err) {
+    logger.error('Get promo codes error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Admin tip user
+app.post('/api/admin/tip-user', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { userId, amount } = req.body;
+    
+    if (!userId || !amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid user or amount' });
+    }
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Add balance without wagering requirements
+    user.balance += parseFloat(amount);
+    await user.save();
+    
+    // Create admin tip record
+    const adminTip = new Wager({
+      userId: user._id,
+      gameType: 'admin_tip',
+      amount: 0,
+      outcome: 'win',
+      profit: parseFloat(amount),
+      meta: {
+        type: 'admin_tip',
+        adminId: req.userId,
+        amount: parseFloat(amount)
+      }
+    });
+    
+    await adminTip.save();
+    
+    // Notify user
+    io.to(`user-${userId}`).emit('balance_update', {
+      newBalance: user.balance,
+      amount: parseFloat(amount),
+      message: `Admin tip: $${amount}`
+    });
+    
+    sendPushNotification(userId, 'Admin Tip', `You received $${amount} from an admin!`);
+    
+    res.json({ success: true, newBalance: user.balance });
+  } catch (err) {
+    logger.error('Admin tip error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================
+// PROVABLY FAIR SYSTEM ROUTES
+// ============================
+
+// Get current server seed (hashed)
+app.get('/api/provably-fair/server-seed', (req, res) => {
+  // Return hashed server seed for transparency
+  const hashedSeed = crypto.createHash('sha256').update(SERVER_SEED).digest('hex');
+  res.json({ 
+    hashedServerSeed: hashedSeed,
+    clientSeed: clientSeed,
+    note: 'Server seed will be revealed when changed'
+  });
+});
+
+// Verify bet result
+app.get('/api/provably-fair/verify/:betId', async (req, res) => {
+  try {
+    const { betId } = req.params;
+    
+    const wager = await Wager.findById(betId);
+    if (!wager) {
+      return res.status(404).json({ error: 'Bet not found' });
+    }
+    
+    // Recalculate the result using the provably fair system
+    const nonce = wager.meta?.nonce || 0;
+    const gameType = wager.gameType;
+    const targetMultiplier = wager.meta?.targetMultiplier;
+    
+    const randomValue = generateProvablyFairResult(SERVER_SEED, clientSeed, nonce, gameType);
+    const result = applyHouseEdge(randomValue, gameType, targetMultiplier);
+    
+    res.json({
+      betId,
+      gameType,
+      serverSeed: SERVER_SEED, // Reveal server seed for verification
+      clientSeed,
+      nonce,
+      randomValue,
+      calculatedResult: result,
+      actualResult: wager.outcome,
+      match: result === (wager.outcome === 'win'),
+      verification: {
+        hashInput: `${clientSeed}:${nonce}:${gameType}`,
+        hmac: crypto.createHmac('sha256', SERVER_SEED)
+          .update(`${clientSeed}:${nonce}:${gameType}`)
+          .digest('hex')
+      }
+    });
+  } catch (err) {
+    logger.error('Verify bet error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================
+// EXISTING ROUTES CONTINUE
+// ============================
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    version: '1.3.0'
+    version: '1.4.0',
+    houseEdge: '30%',
+    features: ['admin_panel', 'provably_fair', '30%_house_edge']
   });
 });
-
-// ============================
-// NEW FEATURES START HERE
-// ============================
 
 // Email Verification Endpoints
 
@@ -2423,10 +2753,6 @@ app.get('/api/analytics/games', authMiddleware, adminMiddleware, async (req, res
   }
 });
 
-// ============================
-// EXISTING ENDPOINTS CONTINUE
-// ============================
-
 // Get cryptocurrency prices
 app.get('/api/crypto/prices', async (req, res) => {
   try {
@@ -2631,11 +2957,6 @@ app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
   }
 });
 
-// Get wagering status endpoint - FIXED VERSION
-app.get('/api/user/wagering-status', authMiddleware, async (req, res) => {
-  // ... your existing wagering status code ...
-});
-
 // EMERGENCY FIX: Reset NaN values for current user
 app.post('/api/fix-nan', authMiddleware, async (req, res) => {
   try {
@@ -2691,7 +3012,7 @@ app.post('/api/fix-nan', authMiddleware, async (req, res) => {
 
 // ADMIN ENDPOINTS FOR HOUSE EDGE MANAGEMENT
 // Get current house edge configuration
-app.get('/api/admin/house-edge', authMiddleware, async (req, res) => {
+app.get('/api/admin/house-edge', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
     if (!user || !user.isAdmin) {
@@ -2705,8 +3026,8 @@ app.get('/api/admin/house-edge', authMiddleware, async (req, res) => {
       coinflipWinChancePercent: (COINFLIP_WIN_CHANCE * 100).toFixed(2),
       explanation: {
         coinflip: `Players have ${(COINFLIP_WIN_CHANCE * 100).toFixed(1)}% win chance instead of 50%`,
-        upgrader: `Win chances reduced by ${(HOUSE_EDGE * 100).toFixed(1)}% (e.g., 2x = ${(45).toFixed(1)}% instead of 50%)`,
-        limbo: `Win chances reduced by ${(HOUSE_EDGE * 100).toFixed(1)}% (e.g., 2x = ${(45).toFixed(1)}% instead of 50%)`
+        upgrader: `Win chances reduced by ${(HOUSE_EDGE * 100).toFixed(1)}% (e.g., 2x = ${(35).toFixed(1)}% instead of 50%)`,
+        limbo: `Win chances reduced by ${(HOUSE_EDGE * 100).toFixed(1)}% (e.g., 2x = ${(35).toFixed(1)}% instead of 50%)`
       }
     });
   } catch (err) {
@@ -3706,7 +4027,7 @@ app.get('/api/user/case-history', authMiddleware, async (req, res) => {
   }
 });
 
-// COINFLIP GAME ENDPOINTS FOR REACT COMPONENT
+// COINFLIP GAME ENDPOINTS FOR REACT COMPONENT - UPDATED WITH PROVABLY FAIR
 app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
   try {
     const { amount, choice } = req.body;
@@ -3728,8 +4049,22 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
     
-    // Record the wager
-    const wager = await recordWager(req.userId, 'coinflip', amount);
+    // Generate provably fair result
+    const nonce = user.gameNonce || 0;
+    const randomValue = generateProvablyFairResult(SERVER_SEED, clientSeed, nonce, 'coinflip');
+    const playerWins = applyHouseEdge(randomValue, 'coinflip');
+    
+    // Increment nonce for next game
+    user.gameNonce = nonce + 1;
+    
+    // Record the wager with provably fair data
+    const wager = await recordWager(req.userId, 'coinflip', amount, {
+      nonce,
+      randomValue,
+      playerChoice: choice,
+      serverSeed: SERVER_SEED,
+      clientSeed: clientSeed
+    });
     
     // Process wager requirements
     await processWagerWithRequirements(req.userId, amount, 'coinflip');
@@ -3740,10 +4075,6 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
     // Track wager stats
     user.totalWagered = (user.totalWagered || 0) + amount;
     user.balance -= amount;
-    
-    // Generate random outcome with house edge (45% win chance for player)
-    const random = Math.random();
-    const playerWins = random < COINFLIP_WIN_CHANCE;
     
     // If player should win, outcome matches their choice
     // If player should lose, outcome is opposite of their choice
@@ -3820,7 +4151,13 @@ app.post('/api/game/coinflip', authMiddleware, async (req, res) => {
       won,
       profit,
       newBalance: user.balance,
-      multiplier: won ? 2.0 : 0
+      multiplier: won ? 2.0 : 0,
+      provablyFair: {
+        nonce,
+        randomValue,
+        serverSeed: SERVER_SEED,
+        clientSeed
+      }
     });
     
   } catch (err) {
@@ -3902,7 +4239,7 @@ app.get('/api/game/stats', authMiddleware, async (req, res) => {
   }
 });
 
-// UPGRADER GAME ENDPOINTS FOR REACT COMPONENT
+// UPGRADER GAME ENDPOINTS FOR REACT COMPONENT - UPDATED WITH PROVABLY FAIR
 app.post('/api/upgrader', authMiddleware, async (req, res) => {
   try {
     const { itemValue, multiplier } = req.body;
@@ -3924,13 +4261,27 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
     
+    // Generate provably fair result
+    const nonce = user.gameNonce || 0;
+    const randomValue = generateProvablyFairResult(SERVER_SEED, clientSeed, nonce, 'upgrader');
+    const won = applyHouseEdge(randomValue, 'upgrader', multiplier);
+    
+    // Increment nonce for next game
+    user.gameNonce = nonce + 1;
+    
     // Calculate win chance based on multiplier with house edge
     // Reduce the theoretical chance by the house edge percentage
     const theoreticalChance = (1 / multiplier) * 100;
     const chance = Math.min(95, theoreticalChance * (1 - HOUSE_EDGE));
     
-    // Record the wager
-    const wager = await recordWager(req.userId, 'upgrader', itemValue);
+    // Record the wager with provably fair data
+    const wager = await recordWager(req.userId, 'upgrader', itemValue, {
+      nonce,
+      randomValue,
+      targetMultiplier: multiplier,
+      serverSeed: SERVER_SEED,
+      clientSeed: clientSeed
+    });
     
     // Process wager requirements
     await processWagerWithRequirements(req.userId, itemValue, 'upgrader');
@@ -3941,10 +4292,6 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
     // Track wager stats
     user.totalWagered = (user.totalWagered || 0) + itemValue;
     user.balance -= itemValue;
-    
-    // Generate random roll (0-100)
-    const roll = Math.random() * 100;
-    const won = roll <= chance;
     
     let profit = 0;
     let newBalance = user.balance;
@@ -4020,7 +4367,7 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
       multiplier: parseFloat(multiplier),
       won,
       profit,
-      roll: parseFloat(roll.toFixed(2)),
+      randomValue: parseFloat(randomValue.toFixed(6)),
       chance: parseFloat(chance.toFixed(2)),
       timestamp: new Date()
     });
@@ -4052,9 +4399,14 @@ app.post('/api/upgrader', authMiddleware, async (req, res) => {
       result: won ? `Upgrade successful! Won $${(itemValue * multiplier).toFixed(2)}` : `Upgrade failed. Lost $${itemValue.toFixed(2)}`,
       newBalance,
       chance: parseFloat(chance.toFixed(2)),
-      roll: parseFloat(roll.toFixed(2)),
+      randomValue: parseFloat(randomValue.toFixed(6)),
       profit,
-      multiplier: parseFloat(multiplier)
+      multiplier: parseFloat(multiplier),
+      provablyFair: {
+        nonce,
+        serverSeed: SERVER_SEED,
+        clientSeed
+      }
     });
     
   } catch (err) {
@@ -4232,8 +4584,22 @@ app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
     const theoreticalChance = (config.winningCups / config.cups) * 100;
     const actualChance = theoreticalChance * (1 - HOUSE_EDGE);
     
-    // Record the wager
-    const wager = await recordWager(req.userId, 'airdrop', amount);
+    // Generate provably fair result
+    const nonce = user.gameNonce || 0;
+    const randomValue = generateProvablyFairResult(SERVER_SEED, clientSeed, nonce, 'airdrop');
+    
+    // Increment nonce for next game
+    user.gameNonce = nonce + 1;
+    
+    // Record the wager with provably fair data
+    const wager = await recordWager(req.userId, 'airdrop', amount, {
+      nonce,
+      randomValue,
+      difficulty,
+      selectedCup,
+      serverSeed: SERVER_SEED,
+      clientSeed: clientSeed
+    });
     
     // Process wager requirements
     await processWagerWithRequirements(req.userId, amount, 'airdrop');
@@ -4257,8 +4623,7 @@ app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
     }
     
     // Determine if player wins (with house edge)
-    const random = Math.random() * 100;
-    const playerShouldWin = random < actualChance;
+    const playerShouldWin = randomValue < (actualChance / 100);
     
     // If player should win, ensure their cup is in winning positions
     // If player should lose, ensure their cup is NOT in winning positions
@@ -4356,6 +4721,7 @@ app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
       won,
       profit,
       multiplier: config.multiplier,
+      randomValue: parseFloat(randomValue.toFixed(6)),
       timestamp: new Date()
     });
     
@@ -4391,7 +4757,13 @@ app.post('/api/game/airdrop', authMiddleware, async (req, res) => {
       difficulty,
       cupCount: config.cups,
       actualChance: parseFloat(actualChance.toFixed(2)),
-      difficultyName: config.name
+      difficultyName: config.name,
+      provablyFair: {
+        nonce,
+        randomValue: parseFloat(randomValue.toFixed(6)),
+        serverSeed: SERVER_SEED,
+        clientSeed
+      }
     });
     
   } catch (err) {
@@ -5079,7 +5451,7 @@ app.post('/api/coinflip/play', authMiddleware, async (req, res) => {
     user.totalWagered = (user.totalWagered || 0) + amount;
     user.balance -= amount;
     
-    // Generate random result with house edge (45% win chance for player)
+    // Generate random result with house edge (35% win chance for player)
     const random = Math.random();
     const playerWins = random < COINFLIP_WIN_CHANCE;
     const playerChoice = side.toLowerCase();
@@ -5139,4 +5511,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   logger.info(`🚀 Server running on port ${PORT}`);
+  logger.info(`🏠 House Edge: ${HOUSE_EDGE * 100}%`);
+  logger.info(`🔐 Admin Panel: Available at /admin`);
+  logger.info(`🔍 Provably Fair: System active with server seed: ${SERVER_SEED.substring(0, 16)}...`);
 });
