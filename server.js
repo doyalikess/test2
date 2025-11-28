@@ -803,7 +803,6 @@ function sendPushNotification(userId, title, message, data = {}) {
   }
 }
 
-// Helper function to process wagers for both deposits and tips
 async function processWagerWithRequirements(userId, amount, gameType) {
   const user = await User.findById(userId);
   if (!user) return;
@@ -844,6 +843,9 @@ async function processWagerWithRequirements(userId, amount, gameType) {
   
   // Check if requirements are fully met
   const requirementsMet = user.unwageredAmount <= 0;
+  
+  // ✅ CRITICAL FIX: Save the user after updating wagering progress
+  await user.save();
   
   logger.info(`Wager processed for user ${userId}: $${amount} in ${gameType}, unwagered: $${previousUnwagered} -> $${user.unwageredAmount}, requirements met: ${requirementsMet}`);
   
