@@ -10,13 +10,9 @@ const wagerSchema = new mongoose.Schema({
   gameType: {
     type: String,
     enum: [
-  'coinflip', 'jackpot', 'mines', 'limbo', 'upgrader', 'manual', 'deposit', 'withdrawal',
-  'free_coins',        // ADD THIS
-  'case_opening',      // ADD THIS  
-  'bonus',
-  'tip',
-  'referral_bonus'
-],
+      'coinflip', 'jackpot', 'mines', 'limbo', 'upgrader', 'manual', 'deposit', 'withdrawal',
+      'free_coins', 'case_opening', 'bonus', 'tip', 'referral_bonus', 'admin_tip'
+    ],
     required: true
   },
   amount: {
@@ -37,6 +33,25 @@ const wagerSchema = new mongoose.Schema({
     type: Number,
     default: 1
   },
+  
+  // PROVABLY FAIR FIELDS - ADD THESE
+  serverSeed: {
+    type: String,
+    default: null
+  },
+  clientSeed: {
+    type: String,
+    default: null
+  },
+  nonce: {
+    type: Number,
+    default: 0
+  },
+  resultHash: {
+    type: String,
+    default: null
+  },
+  
   gameData: {
     type: mongoose.Schema.Types.Mixed,
     default: {}
